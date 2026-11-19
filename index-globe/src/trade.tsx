@@ -12,7 +12,7 @@ type State = "negotiating" | "supplier_review" | "changes_requested" | "reviewed
 type Offer = {
   id: string; seller_id: string; seller: string; site: string; region: string;
   starts_on: string; ends_on: string; volume_kwh: number; price_pence: number;
-  status: "open" | "withdrawn"; source: PowerSource;
+  status: "open" | "withdrawn"; request_id: string | null; source: PowerSource;
 };
 type Deal = {
   id: string; offer_id: string; producer_site: string; buyer_id: string; seller_id: string;
@@ -53,7 +53,7 @@ const notices: Record<string, string> = {
   site: "Choose an electricity source and enter the site, region, dates, volume and price.",
   closed: "This offer is no longer open for new requests.",
   stale: "The deal changed while you were working. Review the current terms and try again.",
-  supplier: "Enter a registered username for a reviewer who is outside this deal.",
+  supplier: "Enter the username of an approved supplier who is outside this deal.",
   review: "Enter the supplier name, agreement reference, and both rates to record the review.",
   attachment: "Choose a CSV under 512 KB with timestamp_utc and kwh columns. Use unique half-hour UTC intervals within the agreed dates.",
   uploaded: "Meter file saved. The comparison uses the latest file from each party.",
@@ -153,20 +153,21 @@ function TermsFields({ start, end, volume, price, newOffer = false }: {
   </div>;
 }
 
-function Workspace({ user, offers, deals, request }: {
-  user: User; offers: Offer[]; deals: Deal[]; request: Request;
+function Workspace({ user, offers, deals, demands, request }: {
+  user: User; offers: Offer[]; deals: Deal[]; demands: Demand[]; request: Request;
 }) {
   return <Shell user={user} active="workspace">
     <div className="trade-wrap">
       <header className="trade-heading">
         <div><p className="eyebrow">Great Britain · Electricity</p><h1>Trading desk</h1>
           <p>Find a producer, agree a quote, and invite a supplier to review the deal.</p></div>
-        <a className="button" href="/workspace/offer">List electricity supply</a>
+        <div className="market-actions"><a className="button" href="/workspace/offer">List electricity supply</a><a className="button secondary" href="/requests/new">Request supply</a></div>
       </header>
       <Notice request={request} />
       <div className="trade-board">
         <section className="trade-section" aria-labelledby="my-deals">
           <h2 id="my-deals">Your deals</h2>
+          {demands.length > 0 && <ul className="trade-list">{demands.map(demand => <li key={demand.id}><a href={"/requests/"+demand.id}><strong>{demand.region}</strong><span>Supply request · {demand.status}</span></a></li>)}</ul>}
           {deals.length === 0 ? <p className="trade-empty">No deals yet. Open an offer to send your first request.</p> :
             <ul className="trade-list">
               {deals.map((deal) => <li key={deal.id}><a href={urlFor(deal.id)}>
@@ -393,7 +394,6 @@ function DealActions({ deal, quote, user }: { deal: Deal; quote: Terms; user: Us
     <form action={base + "/review"} method="post" className="trade-form">
       <input type="hidden" name="version" value={quote.version} />
       <div className="trade-fields">
-        <label>Supplier organization<input name="supplier_name" maxLength={100} /></label>
         <label>Review reference<input name="reference" maxLength={100} /></label>
         <label>Supplier fee · £/MWh<input name="fee" type="number" step=".01" min="0" max="100000" /></label>
         <label>Remaining supply · £/MWh<input name="residual" type="number" step=".01" min="0" max="100000" /></label>
@@ -507,9 +507,10 @@ async function withdrawOffer(id: string, user: User) {
 async function requestOffer(id: string, form: FormData, user: User) {
   const offer = await lookupOffer(id);
   if (!offer || offer.seller_id === user.id) return missing();
+  if (offer.request_id && !await DB.prepare("SELECT id FROM supply_requests WHERE id=? AND buyer_id=? AND status='open'").bind(offer.request_id,user.id).first()) return missing();
   const terms = readTerms(form);
   const site = text(form, "site", 100);
-  if (offer.status !== "open") return redirect(offerUrl(id), "closed");
+  if (offer.status !== "open" || offer.ends_on < new Date().toISOString().slice(0,10)) return redirect(offerUrl(id), "closed");
   if (!terms || !site || !inOffer(terms, offer.starts_on, offer.ends_on, offer.volume_kwh)) {
     return redirect(offerUrl(id), "bad");
   }
@@ -518,7 +519,10 @@ async function requestOffer(id: string, form: FormData, user: User) {
     DB.prepare(`
       INSERT OR IGNORE INTO deals (id,offer_id,buyer_id,seller_id,buyer_site)
       SELECT ?,id,?,seller_id,? FROM power_offers WHERE id = ? AND status = 'open'
-    `).bind(dealId, user.id, site, id),
+        AND ends_on >= date('now') AND (request_id IS NULL OR EXISTS (
+          SELECT 1 FROM supply_requests WHERE supply_requests.id=power_offers.request_id AND buyer_id=? AND status='open'
+        ))
+    `).bind(dealId, user.id, site, id, user.id),
     DB.prepare(`
       INSERT INTO deal_quotes (deal_id,version,author_id,starts_on,ends_on,volume_kwh,price_pence,note)
       SELECT id,1,?,?,?,?,?,? FROM deals WHERE id = ?
@@ -571,7 +575,7 @@ async function invite(deal: Deal, form: FormData, user: User) {
   const path = urlFor(deal.id);
   if (deal.buyer_id !== user.id || deal.status !== "supplier_review" || deal.supplier_id) return redirect(path, "stale");
   const username = text(form, "username", 32).toLowerCase();
-  const reviewer = await DB.prepare("SELECT id FROM users WHERE username = ?").bind(username).first<{ id: string }>();
+  const reviewer = await DB.prepare("SELECT users.id FROM users JOIN approved_suppliers ON approved_suppliers.user_id=users.id WHERE username = ?").bind(username).first<{ id: string }>();
   if (!reviewer || reviewer.id === deal.seller_id || reviewer.id === user.id) return redirect(path, "supplier");
   const update = await DB.prepare(`
     UPDATE deals SET supplier_id = ?, updated_at = unixepoch()
@@ -585,7 +589,9 @@ async function supplierReview(deal: Deal, form: FormData, user: User) {
   if (deal.supplier_id !== user.id || deal.status !== "supplier_review") return redirect(path, "stale");
   const decision = text(form, "decision", 8);
   const note = text(form, "note", 400);
-  const name = text(form, "supplier_name", 100);
+  const supplier = await DB.prepare("SELECT supplier_name FROM approved_suppliers WHERE user_id=?").bind(user.id).first<{supplier_name:string}>();
+  if (!supplier) return missing();
+  const name = supplier.supplier_name;
   const reference = text(form, "reference", 100);
   const fee = decimal(text(form, "fee", 14), 2, 10_000_000);
   const remaining = decimal(text(form, "residual", 14), 2, 10_000_000);
@@ -697,17 +703,142 @@ async function dealAction(request: Request, id: string, action: string) {
   return missing();
 }
 
+type Demand = {
+  id: string; buyer_id: string; region: string; starts_on: string; ends_on: string;
+  volume_kwh: number; source: PowerSource | null; certificates: number; status: string;
+};
+
+async function publicMarket(request: Request) {
+  const user = await currentUser(request);
+  const source = new URL(request.url).searchParams.get("source") ?? "";
+  const filter = isPowerSource(source) ? source : null;
+  const [offers, demands] = await Promise.all([
+    DB.prepare(offerQuery + " WHERE request_id IS NULL AND status = 'open' AND ends_on >= date('now') AND (? IS NULL OR source = ?) ORDER BY power_offers.created_at DESC LIMIT 60").bind(filter, filter).all<Offer>(),
+    DB.prepare("SELECT * FROM supply_requests WHERE status = 'open' AND ends_on >= date('now') AND (? IS NULL OR source IS NULL OR source = ?) ORDER BY rowid DESC LIMIT 60").bind(filter, filter).all<Demand>(),
+  ]);
+  return <Shell user={user} active="market"><div className="trade-wrap">
+    <header className="trade-heading"><div><p className="eyebrow">Great Britain · Electricity</p><h1>Power market</h1>
+      <p>Offer generation or request the electricity your business needs. Agreed terms go to an approved supplier for review.</p></div></header>
+    <div className="market-actions"><a className="button" href="/workspace/offer">List generation</a><a className="button secondary" href="/requests/new">Request electricity supply</a></div>
+    <form className="source-filter" method="get" action="/"><label>Generation source<select name="source" defaultValue={filter ?? ""}><option value="">All sources</option>
+      {Object.entries(powerSources).map(([key,item]) => <option key={key} value={key}>{item.label}</option>)}</select></label><button className="button secondary">Apply filter</button></form>
+    <div className="trade-board">
+      <section className="trade-section"><h2>Generation offers</h2>
+        {offers.results.length ? <ul className="trade-offers">{offers.results.map(offer => <li key={offer.id}><a className="trade-offer" href={offerUrl(offer.id)}>
+          <span>{powerSources[offer.source].label} · {offer.region}</span><strong>{offer.site}</strong>
+          <span>{offer.starts_on} to {offer.ends_on}</span><b>{mwh(offer.volume_kwh)} MWh · {pounds(offer.price_pence)}/MWh</b>
+          <small>Producer-listed · Supplier review pending</small>
+        </a></li>)}</ul> : <p className="trade-empty">{filter ? "No open offers for this source." : "No open generation offers yet."}</p>}
+      </section>
+      <section className="trade-section"><h2>Buyer requests</h2>
+        {demands.results.length ? <ul className="trade-offers">{demands.results.map(demand => <li key={demand.id}><a className="trade-offer" href={"/requests/" + demand.id}>
+          <strong>{demand.region}</strong><span>{demand.source ? powerSources[demand.source].label : "Any electricity source"}</span>
+          <span>{demand.starts_on} to {demand.ends_on}</span><b>{mwh(demand.volume_kwh)} MWh requested</b>
+        </a></li>)}</ul> : <p className="trade-empty">{filter ? "No open requests match this source." : "No open buyer requests yet."}</p>}
+      </section>
+    </div>
+  </div></Shell>;
+}
+
+function SourceOptions() {
+  return Object.entries(powerSources).map(([key,item]) => <option key={key} value={key}>{item.label}</option>);
+}
+
+const demandRoutes = [
+  route("/requests/new", {
+    get: async ({request}) => {
+      const user = await currentUser(request);
+      if (!user) return redirect("/login");
+      return <Shell user={user}><div className="trade-wrap trade-narrow"><header className="trade-heading"><h1>Request electricity supply</h1></header>
+        <Notice request={request} /><form className="trade-form panel" action="/requests/new" method="post">
+          <label>Site region · Great Britain<input name="region" required maxLength={60} /></label>
+          <label>Preferred source<select name="source"><option value="">Any source</option><SourceOptions /></select></label>
+          <div className="trade-fields"><label>Delivery starts<input type="date" name="start" required /></label><label>Delivery ends<input type="date" name="end" required /></label></div>
+          <label>Requested volume · MWh<input name="volume" type="number" min=".001" max="1000000" step=".001" required /></label>
+          <label className="trade-check"><input name="certificates" value="yes" type="checkbox" />Require renewable certificates in the quote</label>
+          <button className="button">Publish request</button>
+        </form></div></Shell>;
+    },
+    post: async ({request}) => {
+      const user = await currentUser(request);
+      if (!user) return redirect("/login");
+      const form = await tradeForm(request);
+      if (!form) return invalidForm();
+      const region = text(form, "region", 60);
+      const source = text(form, "source", 30);
+      const start = text(form, "start", 10), end = text(form, "end", 10);
+      const terms = new FormData();
+      for (const key of ["start","end","volume"]) terms.set(key, text(form, key, 20));
+      terms.set("price", "0");
+      const dates = readTerms(terms);
+      if (!region || (source && !isPowerSource(source)) || !dates || end < new Date().toISOString().slice(0,10)) return redirect("/requests/new", "bad");
+      const id = crypto.randomUUID();
+      await DB.prepare("INSERT INTO supply_requests (id,buyer_id,region,starts_on,ends_on,volume_kwh,source,certificates) VALUES (?,?,?,?,?,?,?,?)")
+        .bind(id,user.id,region,start,end,dates.volume,source || null,Number(form.get("certificates") === "yes")).run();
+      return redirect("/requests/" + id);
+    },
+  }),
+  route("/requests/:id", {
+    get: async ({request,params}) => {
+      const user = await currentUser(request);
+      const demand = await DB.prepare("SELECT * FROM supply_requests WHERE id=?").bind(params.id).first<Demand>();
+      if (!demand) return missing();
+      const open = demand.status === "open" && demand.ends_on >= new Date().toISOString().slice(0,10);
+      const quotes = user ? await DB.prepare(offerQuery + " WHERE request_id=? AND (?=? OR seller_id=?)").bind(demand.id,user.id,demand.buyer_id,user.id).all<Offer>() : null;
+      return <Shell user={user}><div className="trade-wrap trade-narrow"><header className="trade-heading"><div><p className="eyebrow">Buyer request</p><h1>{demand.region}</h1><p>{mwh(demand.volume_kwh)} MWh · {demand.starts_on} to {demand.ends_on}</p></div></header>
+        <p>{demand.source ? powerSources[demand.source].label : "Any electricity source"} · {demand.certificates ? "Certificates required" : "No certificate requirement stated"} · {open ? "Open for quotes" : "Closed"}</p>
+        <Notice request={request} />
+        {!!quotes?.results.length && <section className="panel"><h2>Private quotes</h2><ul>{quotes.results.map(quote => <li key={quote.id}><a href={offerUrl(quote.id)}>{quote.site} · {pounds(quote.price_pence)}/MWh</a></li>)}</ul></section>}
+        {open && user?.id === demand.buyer_id && <form method="post" action={"/requests/"+demand.id+"/close"}><button className="button secondary">Close request</button></form>}
+        {open && (!user ? <a className="button" href="/login">Sign in to quote</a> : user.id !== demand.buyer_id && !quotes?.results.length && <form className="trade-form panel" method="post" action={"/requests/"+demand.id+"/quote"}>
+          <h2>Send a private quote</h2>
+          <label>Generation site<input name="site" required maxLength={100} /></label><label>Generator region<input name="region" required maxLength={60} /></label>
+          <label>Electricity source<select name="source" defaultValue={demand.source ?? ""} required><option value="" disabled>Choose a source</option><SourceOptions /></select></label>
+          <TermsFields start={demand.starts_on} end={demand.ends_on} volume={demand.volume_kwh / 1000} />
+          <label className="trade-check"><input name="permission" type="checkbox" value="yes" required />I represent this generator and can discuss this supply.</label>
+          <button className="button">Send quote</button>
+        </form>)}
+      </div></Shell>;
+    },
+  }),
+  route("/requests/:id/:action", { post: async ({request,params}) => {
+    const user = await currentUser(request);
+    if (!user) return redirect("/login");
+    const form = await tradeForm(request);
+    if (!form) return invalidForm();
+    const demand = await DB.prepare("SELECT * FROM supply_requests WHERE id=? AND status='open'").bind(params.id).first<Demand>();
+    if (!demand) return missing();
+    const path = "/requests/" + demand.id;
+    if (params.action === "close" && demand.buyer_id === user.id) {
+      await DB.prepare("UPDATE supply_requests SET status='closed' WHERE id=? AND buyer_id=?").bind(demand.id,user.id).run();
+      return redirect(path);
+    }
+    if (params.action !== "quote" || user.id === demand.buyer_id) return missing();
+    const terms = readTerms(form), source = text(form,"source",30), site = text(form,"site",100), region = text(form,"region",60);
+    if (!terms || !isPowerSource(source) || (demand.source && demand.source !== source) || !site || !region || form.get("permission") !== "yes" ||
+        !inOffer(terms,demand.starts_on,demand.ends_on,demand.volume_kwh)) return redirect(path,"bad");
+    const result = await DB.prepare(`INSERT OR IGNORE INTO power_offers
+      (id,seller_id,site,region,starts_on,ends_on,volume_kwh,price_pence,source,request_id)
+      SELECT ?,?,?,?,?,?,?,?,?,id FROM supply_requests WHERE id=? AND status='open' AND ends_on>=date('now')`)
+      .bind(crypto.randomUUID(),user.id,site,region,terms.start,terms.end,terms.volume,terms.price,source,demand.id).run();
+    return redirect(path,result.meta.changes ? "saved" : "stale");
+  } }),
+];
+
 export const tradeRoutes = [
+  route("/", { get: ({request}) => publicMarket(request) }),
+  ...demandRoutes,
   route("/workspace", { get: async ({ request }) => {
     const user = await currentUser(request);
     if (!user) return redirect("/login");
     const source = new URL(request.url).searchParams.get("source") ?? "";
-    const [offers, deals] = await Promise.all([
-      DB.prepare(offerQuery + " WHERE status = 'open' AND (? IS NULL OR source = ?) ORDER BY created_at DESC, power_offers.id LIMIT 60").bind(isPowerSource(source) ? source : null, isPowerSource(source) ? source : null).all<Offer>(),
+    const [offers, deals, demands] = await Promise.all([
+      DB.prepare(offerQuery + " WHERE request_id IS NULL AND status = 'open' AND ends_on >= date('now') AND (? IS NULL OR source = ?) ORDER BY power_offers.created_at DESC, power_offers.id LIMIT 60").bind(isPowerSource(source) ? source : null, isPowerSource(source) ? source : null).all<Offer>(),
       DB.prepare(dealQuery + " WHERE " + dealScope + " ORDER BY updated_at DESC, deals.id LIMIT 60")
         .bind(user.id, user.id, user.id).all<Deal>(),
+      DB.prepare("SELECT * FROM supply_requests WHERE buyer_id=? ORDER BY rowid DESC LIMIT 60").bind(user.id).all<Demand>(),
     ]);
-    return <Workspace user={user} offers={offers.results} deals={deals.results} request={request} />;
+    return <Workspace user={user} offers={offers.results} deals={deals.results} demands={demands.results} request={request} />;
   } }),
   route("/workspace/offer", {
     get: async ({ request }) => {
@@ -723,13 +854,17 @@ export const tradeRoutes = [
   }),
   route("/offers/:id", { get: async ({ request, params }) => {
     const user = await currentUser(request);
-    if (!user) return redirect("/login");
-    const [offer, existing] = await Promise.all([
-      lookupOffer(params.id),
-      DB.prepare("SELECT id FROM deals WHERE offer_id = ? AND buyer_id = ?")
-        .bind(params.id, user.id).first<{ id: string }>(),
-    ]);
-    return offer ? <OfferPage user={user} offer={offer} existing={existing} request={request} /> : missing();
+    const offer = await lookupOffer(params.id);
+    if (!offer) return missing();
+    if (offer.request_id && (!user || (offer.seller_id !== user.id &&
+      !await DB.prepare("SELECT id FROM supply_requests WHERE id=? AND buyer_id=?").bind(offer.request_id,user.id).first()))) return missing();
+    if (!user) return <Shell active="market"><div className="trade-wrap trade-narrow"><header className="trade-heading"><div>
+      <p className="eyebrow">{powerSources[offer.source].label} · {offer.region}</p><h1>{offer.site}</h1>
+      <p>{mwh(offer.volume_kwh)} MWh · {pounds(offer.price_pence)}/MWh · {offer.starts_on} to {offer.ends_on}</p></div></header>
+      {offer.status === "open" && offer.ends_on >= new Date().toISOString().slice(0,10) && <a className="button" href="/login">Sign in to request this supply</a>}
+    </div></Shell>;
+    const existing = await DB.prepare("SELECT id FROM deals WHERE offer_id = ? AND buyer_id = ?").bind(params.id,user.id).first<{id:string}>();
+    return <OfferPage user={user} offer={offer} existing={existing} request={request} />;
   } }),
   route("/offers/:id/request", { post: async ({ request, params }) => {
     const user = await currentUser(request);

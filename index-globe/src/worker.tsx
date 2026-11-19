@@ -38,7 +38,6 @@ export default defineApp([
     }
   },
   render(Document, [
-    route("/", { get: async ({ request }) => <PublicScreen page="market" user={await currentUser(request)} /> }),
     route("/about", { get: async ({ request }) => <PublicScreen page="about" user={await currentUser(request)} /> }),
     route("/announcements", { get: async ({ request }) => <PublicScreen page="announcements" user={await currentUser(request)} /> }),
     route("/pricing", { get: async ({ request }) => {

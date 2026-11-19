@@ -1,7 +1,6 @@
-import { Example } from "./example";
 import { Shell } from "./shell";
 type User = { username: string };
-type PublicPage = "market" | "about" | "pricing" | "announcements";
+type PublicPage = "about" | "pricing" | "announcements";
 
 const flows = [
   {
@@ -24,19 +23,6 @@ const flows = [
 
 export function PublicScreen({ page, user, pilotStatus }: { page: PublicPage; user?: User | null; pilotStatus?: string }) {
   return <Shell user={user} active={page}>
-    {page === "market" && <>
-      <section className="market-hero">
-        <div className="market-message"><p className="eyebrow">Electricity procurement</p>
-          <h1>Buy power from a source you choose.</h1>
-          <p>Compare a generator’s offer with your demand, negotiate terms, and prepare a deal for supplier review.</p>
-          <div className="market-actions"><a href="#compare" className="button">Compare sample offers <span aria-hidden="true">↗</span></a><a href={user ? "/workspace" : "/signup"} className="button secondary">{user ? "Open workspace" : "Create workspace"}</a></div>
-        </div>
-        <figure className="market-picture"><div className="hero-photo" role="img" aria-label="Illustration of a solar farm" />
-          <figcaption><span><i aria-hidden="true" /> Example generation site</span><span>Great Britain pilot model</span></figcaption>
-        </figure>
-      </section>
-      <Example />
-    </>}
     {page === "about" && <article className="about-page">
       <header className="page-intro"><p className="eyebrow">How it works</p><h1>One deal, two paths.</h1><p>Compare electricity from different sources. The grid operator manages delivery and a licensed supplier handles billing and settlement.</p></header>
       <div className="flows">{flows.map(flow => <section className={"flow " + flow.key} key={flow.key}>
@@ -44,12 +30,12 @@ export function PublicScreen({ page, user, pilotStatus }: { page: PublicPage; us
         <ol>{flow.steps.map(([title, body, actor]) => <li key={title}><small>{actor}</small><strong>{title}</strong><p>{body}</p></li>)}</ol>
         <p className="flow-note">{flow.note}</p>
       </section>)}</div>
-      <div className="about-bottom"><h2>What a deal can prove</h2><p>A comparison can show which intervals match and how agreed prices apply. A live deal becomes active only after the supplier, generator and buyer confirm the signed terms.</p><a href="/#compare" className="button secondary">Try a fictional deal</a></div>
+      <div className="about-bottom"><h2>When a deal can go live</h2><p>A comparison can show which intervals match and how agreed prices apply. A live deal becomes active only after the supplier, generator and buyer confirm the signed terms.</p><a href="/" className="button secondary">Browse the power market</a></div>
     </article>}
     {page === "pricing" && <article className="pricing-page">
       <header className="page-intro"><p className="eyebrow">Pricing</p><h1>Start exploring. Pay for a live pilot.</h1><p>Software pricing is separate from the price of electricity and the supplier’s charges.</p></header>
       <div className="plans">
-        <section className="panel plan"><h2>Explore</h2><strong className="plan-price">Free</strong><p>For buyers and generators evaluating their next deal.</p><ul><li>Try the public sample comparison</li><li>Create a private workspace</li><li>Draft offers and review terms with a counterparty</li></ul><a className="button secondary" href={user ? "/workspace" : "/signup"}>{user ? "Open workspace" : "Create workspace"}</a></section>
+        <section className="panel plan"><h2>Explore</h2><strong className="plan-price">Free</strong><p>For buyers and generators evaluating their next deal.</p><ul><li>Browse published offers and requests</li><li>Create a private workspace</li><li>Draft offers and review terms with a counterparty</li></ul><a className="button secondary" href={user ? "/workspace" : "/signup"}>{user ? "Open workspace" : "Create workspace"}</a></section>
         <section className="panel plan paid"><h2>Supplier pilot</h2><strong className="plan-price">Fixed quote</strong><p>For a supplier running a real transaction with approved data.</p><ul><li>Agree scope and onboarding cost up front</li><li>Review one supplier format and billing cycle</li><li>Set a recurring workspace fee after the pilot</li></ul>
           {user ? pilotStatus ? <p className="inline-result" role="status">{pilotStatus}</p> : <form action="/pricing/pilot" method="post"><button className="button">Request pilot review</button></form> : <a className="button" href="/signup">Create a workspace to request a pilot</a>}
         </section>
@@ -58,7 +44,7 @@ export function PublicScreen({ page, user, pilotStatus }: { page: PublicPage; us
     </article>}
     {page === "announcements" && <article className="announcements-page">
       <header className="page-intro"><p className="eyebrow">Index Globe updates</p><h1>Announcements</h1></header>
-      <section className="panel empty-news"><h2>No announcements yet</h2><p>Product and pilot updates will appear here.</p><a href="/" className="button secondary">Explore a sample deal</a></section>
+      <section className="panel empty-news"><h2>No announcements yet</h2><p>Product and pilot updates will appear here.</p><a href="/" className="button secondary">Browse the power market</a></section>
     </article>}
   </Shell>;
 }
