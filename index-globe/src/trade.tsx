@@ -716,25 +716,42 @@ async function publicMarket(request: Request) {
     DB.prepare(offerQuery + " WHERE request_id IS NULL AND status = 'open' AND ends_on >= date('now') AND (? IS NULL OR source = ?) ORDER BY power_offers.created_at DESC LIMIT 60").bind(filter, filter).all<Offer>(),
     DB.prepare("SELECT * FROM supply_requests WHERE status = 'open' AND ends_on >= date('now') AND (? IS NULL OR source IS NULL OR source = ?) ORDER BY rowid DESC LIMIT 60").bind(filter, filter).all<Demand>(),
   ]);
-  return <Shell user={user} active="market"><div className="trade-wrap">
-    <header className="trade-heading"><div><p className="eyebrow">Great Britain · Electricity</p><h1>Power market</h1>
-      <p>Offer generation or request the electricity your business needs. Agreed terms go to an approved supplier for review.</p></div></header>
-    <div className="market-actions"><a className="button" href="/workspace/offer">List generation</a><a className="button secondary" href="/requests/new">Request electricity supply</a></div>
-    <form className="source-filter" method="get" action="/"><label>Generation source<select name="source" defaultValue={filter ?? ""}><option value="">All sources</option>
-      {Object.entries(powerSources).map(([key,item]) => <option key={key} value={key}>{item.label}</option>)}</select></label><button className="button secondary">Apply filter</button></form>
+  const hasListings = offers.results.length > 0 || demands.results.length > 0;
+  return <Shell user={user} active="market"><div className="trade-wrap market-desk">
+    <header className="market-mast">
+      <p className="eyebrow">Great Britain · Electricity</p><h1>Power market</h1>
+      <p>Post the power you need or the generation you can offer. Negotiate privately, then send agreed terms to a licensed supplier for review.</p>
+    </header>
+    <div className="market-entry">
+      <section className="market-role buyer-entry">
+        <span className="role-label">For buyers</span><h2>Find power for your business</h2>
+        <p>Set your delivery dates, volume and preferred source so producers know what to quote.</p>
+        <a className="button" href="/requests/new">Request electricity supply <span aria-hidden="true">↗</span></a>
+      </section>
+      <section className="market-role producer-entry">
+        <span className="role-label">For producers</span><h2>Offer your generation</h2>
+        <p>Publish your available volume and asking price so buyers can respond to your offer.</p>
+        <a className="button secondary" href="/workspace/offer">List generation <span aria-hidden="true">↗</span></a>
+      </section>
+    </div>
+    <div className="market-board-title">
+      <h2>Open listings</h2>
+      {(hasListings || filter) && <form className="source-filter" method="get" action="/"><label>Generation source<select name="source" defaultValue={filter ?? ""}><option value="">All sources</option>
+      {Object.entries(powerSources).map(([key,item]) => <option key={key} value={key}>{item.label}</option>)}</select></label><button className="button secondary">Apply filter</button></form>}
+    </div>
     <div className="trade-board">
       <section className="trade-section"><h2>Generation offers</h2>
         {offers.results.length ? <ul className="trade-offers">{offers.results.map(offer => <li key={offer.id}><a className="trade-offer" href={offerUrl(offer.id)}>
           <span>{powerSources[offer.source].label} · {offer.region}</span><strong>{offer.site}</strong>
           <span>{offer.starts_on} to {offer.ends_on}</span><b>{mwh(offer.volume_kwh)} MWh · {pounds(offer.price_pence)}/MWh</b>
           <small>Producer-listed · Supplier review pending</small>
-        </a></li>)}</ul> : <p className="trade-empty">{filter ? "No open offers for this source." : "No open generation offers yet."}</p>}
+        </a></li>)}</ul> : <p className="trade-empty">{filter ? "No open offers for this source." : "No open generation offers."}</p>}
       </section>
       <section className="trade-section"><h2>Buyer requests</h2>
         {demands.results.length ? <ul className="trade-offers">{demands.results.map(demand => <li key={demand.id}><a className="trade-offer" href={"/requests/" + demand.id}>
           <strong>{demand.region}</strong><span>{demand.source ? powerSources[demand.source].label : "Any electricity source"}</span>
           <span>{demand.starts_on} to {demand.ends_on}</span><b>{mwh(demand.volume_kwh)} MWh requested</b>
-        </a></li>)}</ul> : <p className="trade-empty">{filter ? "No open requests match this source." : "No open buyer requests yet."}</p>}
+        </a></li>)}</ul> : <p className="trade-empty">{filter ? "No open requests match this source." : "No open buyer requests."}</p>}
       </section>
     </div>
   </div></Shell>;

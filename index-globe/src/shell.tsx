@@ -3,7 +3,7 @@ import { SignOut } from "./sign-out";
 type User = { username: string };
 export function Shell({ user, active, children }: { user?: User | null; active?: string; children: React.ReactNode }) {
   const nav = [
-    ["/", "market", "Explore", "M3 17h4V7H3zM10 17h4V3h-4zM17 17h4v-6h-4z"],
+    ["/", "market", "Market", "M3 17h4V7H3zM10 17h4V3h-4zM17 17h4v-6h-4z"],
     ["/about", "about", "How it works", "M3 6h5v5H3zM16 13h5v5h-5zM8 8.5h5v7h3"],
     ["/pricing", "pricing", "Pricing", "M3 6h18v12H3zM3 10h18M6 15h4"],
     ...(user ? [["/workspace", "workspace", "Workspace", "M3 6h18v14H3zM8 6V3h8v3M3 11h18"]] : []),
