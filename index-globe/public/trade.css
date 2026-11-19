@@ -91,3 +91,5 @@
   .trade-list a { flex-wrap: wrap; }
 }
 @media (max-width: 380px) { .trade-fields { grid-template-columns: 1fr; } }
+.source-filter { display: flex; gap: 8px; align-items: end; margin: 14px 0; }
+.source-filter label { display: grid; gap: 4px; font-size: .84rem; }

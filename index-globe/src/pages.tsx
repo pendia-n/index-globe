@@ -7,7 +7,7 @@ const flows = [
   {
     key: "physical", label: "Physical electricity", icon: "↗", note: "The grid balances supply and demand. Metered matching attributes a contractual volume at each interval.",
     steps: [
-      ["Renewable site", "Solar generation exports to the network.", "Export meter"],
+      ["Generation site", "A generation site exports electricity to the network.", "Export meter"],
       ["Shared power grid", "Network and market operators manage electricity flows.", "Grid operator"],
       ["Business site", "The business draws power and its meter records consumption.", "Import meter"],
     ],
@@ -26,19 +26,19 @@ export function PublicScreen({ page, user, pilotStatus }: { page: PublicPage; us
   return <Shell user={user} active={page}>
     {page === "market" && <>
       <section className="market-hero">
-        <div className="market-message"><p className="eyebrow">Renewable electricity procurement</p>
+        <div className="market-message"><p className="eyebrow">Electricity procurement</p>
           <h1>Buy power from a source you choose.</h1>
           <p>Compare a generator’s offer with your demand, negotiate terms, and prepare a deal for supplier review.</p>
           <div className="market-actions"><a href="#compare" className="button">Compare sample offers <span aria-hidden="true">↗</span></a><a href={user ? "/workspace" : "/signup"} className="button secondary">{user ? "Open workspace" : "Create workspace"}</a></div>
         </div>
         <figure className="market-picture"><div className="hero-photo" role="img" aria-label="Illustration of a solar farm" />
-          <figcaption><span><i aria-hidden="true" /> Solar procurement</span><span>Great Britain pilot model</span></figcaption>
+          <figcaption><span><i aria-hidden="true" /> Example generation site</span><span>Great Britain pilot model</span></figcaption>
         </figure>
       </section>
       <Example />
     </>}
     {page === "about" && <article className="about-page">
-      <header className="page-intro"><p className="eyebrow">How it works</p><h1>One deal, two paths.</h1><p>Index Globe coordinates the commercial deal. The grid and licensed supplier carry out delivery and settlement.</p></header>
+      <header className="page-intro"><p className="eyebrow">How it works</p><h1>One deal, two paths.</h1><p>Compare electricity from different sources. The grid operator manages delivery and a licensed supplier handles billing and settlement.</p></header>
       <div className="flows">{flows.map(flow => <section className={"flow " + flow.key} key={flow.key}>
         <h2><span aria-hidden="true">{flow.icon}</span> {flow.label}</h2>
         <ol>{flow.steps.map(([title, body, actor]) => <li key={title}><small>{actor}</small><strong>{title}</strong><p>{body}</p></li>)}</ol>

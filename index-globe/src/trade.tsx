@@ -2,6 +2,7 @@ import { env } from "cloudflare:workers";
 import { route } from "rwsdk/router";
 import { currentUser } from "./auth";
 import { Shell } from "./shell";
+import { isPowerSource, powerSources, type PowerSource } from "./power-sources";
 
 const { DB, DOCUMENTS } = env as unknown as { DB: D1Database; DOCUMENTS: R2Bucket };
 type User = NonNullable<Awaited<ReturnType<typeof currentUser>>>;
@@ -11,7 +12,7 @@ type State = "negotiating" | "supplier_review" | "changes_requested" | "reviewed
 type Offer = {
   id: string; seller_id: string; seller: string; site: string; region: string;
   starts_on: string; ends_on: string; volume_kwh: number; price_pence: number;
-  status: "open" | "withdrawn";
+  status: "open" | "withdrawn"; source: PowerSource;
 };
 type Deal = {
   id: string; offer_id: string; producer_site: string; buyer_id: string; seller_id: string;
@@ -19,7 +20,7 @@ type Deal = {
   buyer_site: string; status: State; quote_version: number;
   supplier_name: string | null; supplier_reference: string | null; supplier_note: string | null;
   sleeve_price_pence: number | null; remaining_price_pence: number | null;
-  available_from: string; available_to: string; available_kwh: number;
+  available_from: string; available_to: string; available_kwh: number; source: PowerSource;
 };
 type Terms = {
   version: number; author_id: string; author: string; starts_on: string;
@@ -28,14 +29,14 @@ type Terms = {
 type MeterFile = { id: string; object_key: string; role: MeterParty; intervals: number };
 
 const offerQuery = `
-  SELECT solar_offers.*, users.username AS seller
-  FROM solar_offers JOIN users ON users.id = seller_id
+  SELECT power_offers.*, users.username AS seller
+  FROM power_offers JOIN users ON users.id = seller_id
 `;
 const dealQuery = `
-  SELECT deals.*, o.site AS producer_site, b.username AS buyer, s.username AS seller, p.username AS reviewer,
+  SELECT deals.*, o.source, o.site AS producer_site, b.username AS buyer, s.username AS seller, p.username AS reviewer,
     o.starts_on AS available_from, o.ends_on AS available_to, o.volume_kwh AS available_kwh
   FROM deals
-  JOIN solar_offers o ON o.id = deals.offer_id
+  JOIN power_offers o ON o.id = deals.offer_id
   JOIN users b ON b.id = deals.buyer_id JOIN users s ON s.id = deals.seller_id
   LEFT JOIN users p ON p.id = deals.supplier_id
 `;
@@ -49,7 +50,7 @@ const states: Record<State, string> = {
 const notices: Record<string, string> = {
   saved: "Changes saved.",
   bad: "Check the dates, volume and price. Dates and volume must fit within the listed offer.",
-  site: "Enter a site name, region, dates, volume and price.",
+  site: "Choose an electricity source and enter the site, region, dates, volume and price.",
   closed: "This offer is no longer open for new requests.",
   stale: "The deal changed while you were working. Review the current terms and try again.",
   supplier: "Enter a registered username for a reviewer who is outside this deal.",
@@ -123,7 +124,7 @@ function roleOf(deal: Deal, user: User): Party {
   return "supplier";
 }
 
-const lookupOffer = (id: string) => DB.prepare(offerQuery + " WHERE solar_offers.id = ?").bind(id).first<Offer>();
+const lookupOffer = (id: string) => DB.prepare(offerQuery + " WHERE power_offers.id = ?").bind(id).first<Offer>();
 
 const lookupDeal = (id: string, user: User) =>
   DB.prepare(dealQuery + " WHERE deals.id = ? AND " + dealScope).bind(id, user.id, user.id, user.id).first<Deal>();
@@ -158,9 +159,9 @@ function Workspace({ user, offers, deals, request }: {
   return <Shell user={user} active="workspace">
     <div className="trade-wrap">
       <header className="trade-heading">
-        <div><p className="eyebrow">Great Britain · Solar</p><h1>Trading desk</h1>
+        <div><p className="eyebrow">Great Britain · Electricity</p><h1>Trading desk</h1>
           <p>Find a producer, agree a quote, and invite a supplier to review the deal.</p></div>
-        <a className="button" href="/workspace/offer">List solar supply</a>
+        <a className="button" href="/workspace/offer">List electricity supply</a>
       </header>
       <Notice request={request} />
       <div className="trade-board">
@@ -175,12 +176,19 @@ function Workspace({ user, offers, deals, request }: {
             </ul>}
         </section>
         <section className="trade-section" aria-labelledby="offers">
-          <h2 id="offers">Available solar offers</h2>
-          {offers.length === 0 ? <p className="trade-empty">No producers have listed supply yet. If you export solar power, list your site and available volume.</p> :
+          <h2 id="offers">Available power offers</h2>
+          <form action="/workspace#offers" method="get" className="source-filter">
+            <label>Filter by source<select name="source" defaultValue={new URL(request.url).searchParams.get("source") ?? ""}>
+              <option value="">All sources</option>
+              {Object.entries(powerSources).map(([key, source]) => <option key={key} value={key}>{source.label}</option>)}
+            </select></label>
+            <button className="button secondary">Apply</button>
+          </form>
+          {offers.length === 0 ? <p className="trade-empty">No producers have listed supply yet. If you export electricity, list your site and available volume.</p> :
             <ul className="trade-offers">
               {offers.map((offer) => <li key={offer.id}>
                 <a href={offerUrl(offer.id)} className="trade-offer">
-                  <span className="trade-offer-top"><span>{offer.region}</span><span>{offer.seller_id === user.id ? "Your offer" : "Seller-listed"}</span></span>
+                  <span className="trade-offer-top"><span>{powerSources[offer.source].label} · {offer.region}</span><span>{offer.seller_id === user.id ? "Your offer" : "Seller-listed"}</span></span>
                   <strong>{offer.site}</strong>
                   <span>{offer.starts_on} to {offer.ends_on}</span>
                   <span className="trade-offer-numbers"><b>{mwh(offer.volume_kwh)} MWh</b><b>{pounds(offer.price_pence)}<small> / MWh</small></b></span>
@@ -197,11 +205,14 @@ function NewOffer({ user, request }: { user: User; request: Request }) {
   return <Shell user={user} active="workspace">
     <div className="trade-wrap trade-narrow">
       <a className="trade-back" href="/workspace">← Trading desk</a>
-      <header className="trade-heading"><div><p className="eyebrow">Producer</p><h1>List solar supply</h1>
+      <header className="trade-heading"><div><p className="eyebrow">Producer</p><h1>List electricity supply</h1>
         <p>Publish an indicative offer using export volume your site can commit for this period.</p></div></header>
       <Notice request={request} />
       <form className="trade-form panel" action="/workspace/offer" method="post">
         <div className="trade-fields">
+          <label>Electricity source<select name="source" defaultValue="" required><option value="" disabled>Choose a source</option>
+            {Object.entries(powerSources).map(([key, source]) => <option key={key} value={key}>{source.label}</option>)}
+          </select></label>
           <label>Generation site<input name="site" maxLength={100} required /></label>
           <label>Site region · Great Britain<input name="region" placeholder="e.g. West Midlands" maxLength={60} required /></label>
         </div>
@@ -220,8 +231,8 @@ function OfferPage({ user, offer, existing, request }: {
   return <Shell user={user} active="workspace">
     <div className="trade-wrap">
       <a className="trade-back" href="/workspace">← Trading desk</a>
-      <header className="trade-heading"><div><p className="eyebrow">Solar offer · {offer.region}</p><h1>{offer.site}</h1>
-        <p>Listed by {offer.seller}. Site and volumes supplied by the producer.</p></div>
+      <header className="trade-heading"><div><p className="eyebrow">{powerSources[offer.source].label} · {offer.region}</p><h1>{offer.site}</h1>
+        <p>{powerSources[offer.source].category} · Listed by {offer.seller}. Site and volumes supplied by the producer.</p></div>
         <span className="trade-status">{offer.status === "open" ? "Open for requests" : "Withdrawn"}</span>
       </header>
       <Notice request={request} />
@@ -443,7 +454,7 @@ function DealPage({ deal, user, history, files, comparison, request }: {
     <div className="trade-wrap">
       <a className="trade-back" href="/workspace">← Trading desk</a>
       <header className="trade-heading">
-        <div><p className="eyebrow">Solar deal · {role}</p><h1>{deal.producer_site}</h1><p>Supply to {deal.buyer_site}</p></div>
+        <div><p className="eyebrow">{powerSources[deal.source].label} · {role}</p><h1>{deal.producer_site}</h1><p>Supply to {deal.buyer_site}</p></div>
         <span className="trade-status">{states[deal.status]}</span>
       </header>
       <Notice request={request} />
@@ -474,20 +485,21 @@ async function createOffer(form: FormData, user: User) {
   const terms = readTerms(form);
   const site = text(form, "site", 100);
   const region = text(form, "region", 60);
-  if (!terms || !site || !region || text(form, "permission", 3) !== "yes") {
+  const source = text(form, "source", 30);
+  if (!isPowerSource(source) || !terms || !site || !region || text(form, "permission", 3) !== "yes") {
     return redirect("/workspace/offer", "site");
   }
   const id = crypto.randomUUID();
   await DB.prepare(`
-    INSERT INTO solar_offers (id,seller_id,site,region,starts_on,ends_on,volume_kwh,price_pence)
-    VALUES (?,?,?,?,?,?,?,?)
-  `).bind(id, user.id, site, region, terms.start, terms.end, terms.volume, terms.price).run();
+    INSERT INTO power_offers (id,seller_id,site,region,starts_on,ends_on,volume_kwh,price_pence,source)
+    VALUES (?,?,?,?,?,?,?,?,?)
+  `).bind(id, user.id, site, region, terms.start, terms.end, terms.volume, terms.price, source).run();
   return redirect(offerUrl(id), "saved");
 }
 
 async function withdrawOffer(id: string, user: User) {
   const result = await DB.prepare(`
-    UPDATE solar_offers SET status = 'withdrawn' WHERE id = ? AND seller_id = ?
+    UPDATE power_offers SET status = 'withdrawn' WHERE id = ? AND seller_id = ?
   `).bind(id, user.id).run();
   return result.meta.changes ? redirect(offerUrl(id), "saved") : missing();
 }
@@ -505,7 +517,7 @@ async function requestOffer(id: string, form: FormData, user: User) {
   const [created] = await DB.batch([
     DB.prepare(`
       INSERT OR IGNORE INTO deals (id,offer_id,buyer_id,seller_id,buyer_site)
-      SELECT ?,id,?,seller_id,? FROM solar_offers WHERE id = ? AND status = 'open'
+      SELECT ?,id,?,seller_id,? FROM power_offers WHERE id = ? AND status = 'open'
     `).bind(dealId, user.id, site, id),
     DB.prepare(`
       INSERT INTO deal_quotes (deal_id,version,author_id,starts_on,ends_on,volume_kwh,price_pence,note)
@@ -630,6 +642,7 @@ function attachment(body: BodyInit, filename: string, type = "text/plain; charse
 function dealSheet(deal: Deal, quote: Terms) {
   const output = [
     "Index Globe | Trade review record",
+    "Electricity source: " + powerSources[deal.source].label,
     "Producer site: " + deal.producer_site, "Buyer site: " + deal.buyer_site,
     "Quote: " + quote.version, "Status: " + states[deal.status],
     "Delivery dates (UTC): " + quote.starts_on + " to " + quote.ends_on,
@@ -688,8 +701,9 @@ export const tradeRoutes = [
   route("/workspace", { get: async ({ request }) => {
     const user = await currentUser(request);
     if (!user) return redirect("/login");
+    const source = new URL(request.url).searchParams.get("source") ?? "";
     const [offers, deals] = await Promise.all([
-      DB.prepare(offerQuery + " WHERE status = 'open' ORDER BY created_at DESC, solar_offers.id LIMIT 60").all<Offer>(),
+      DB.prepare(offerQuery + " WHERE status = 'open' AND (? IS NULL OR source = ?) ORDER BY created_at DESC, power_offers.id LIMIT 60").bind(isPowerSource(source) ? source : null, isPowerSource(source) ? source : null).all<Offer>(),
       DB.prepare(dealQuery + " WHERE " + dealScope + " ORDER BY updated_at DESC, deals.id LIMIT 60")
         .bind(user.id, user.id, user.id).all<Deal>(),
     ]);

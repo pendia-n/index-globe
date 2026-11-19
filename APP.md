@@ -1,6 +1,6 @@
 # Index Globe
 
-Index Globe helps an independent renewable generator, a business buyer and a licensed supplier work through a power deal. The first proposed market is Great Britain. The public workspace uses labelled fictional data to explain the process.
+Index Globe helps an independent electricity generator, a business buyer and a licensed supplier work through a power deal. The first proposed market is Great Britain. Offers can distinguish renewable generation, nuclear and gas-fired electricity. Source labels do not certify environmental claims. The public workspace uses labelled fictional data to explain the process.
 
 A buyer can compare demand with generation and see the share that needs remaining supply. In the private workspace, the parties keep the current offer, quote history, supplier review and meter evidence together. The app makes it clear when someone still needs to act. Its purpose is to carry agreed terms into an auditable handoff for a supplier, from an offer to metered evidence.
 
