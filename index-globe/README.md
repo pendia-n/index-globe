@@ -1,13 +1,24 @@
-# Index Globe
+# RedwoodSDK Minimal Starter
 
-RedwoodSDK on Cloudflare Workers. D1 stores account, trade and pilot state. The private R2 binding `DOCUMENTS` is for pilot evidence. See the parent `APP.md` for the product and settlement model.
+This is the starter project for RedwoodSDK. It's a template designed to get you up and running as quickly as possible.
 
-## Local development
+Create your new project:
 
-Run `pnpm install`, `wrangler d1 migrations apply index-globe-db --local` and `pnpm dev`. Use an HTTPS origin for secure cookies or an HTTP loopback origin supported by your browser. The root `.env` supplies `INDEX_GLOBE_JWT_SECRET`. Never commit it.
+```shell
+npx create-rwsdk my-project-name
+cd my-project-name
+npm install
+```
 
-## Stripe sandbox
+## Running the dev server
 
-Create an event destination in the dedicated Index Globe Stripe sandbox. Subscribe to the snapshot `invoice.paid` event and point it to `/api/stripe/webhook` on an accessible sandbox Worker. Set `INDEX_GLOBE_STRIPE_WEBHOOK_SECRET` using a Worker secret. Leave `INDEX_GLOBE_STRIPE_LIVE` unset for the sandbox.
+```shell
+npm run dev
+```
 
-The initial offer is a manually agreed fixed pilot fee. Issue the Stripe invoice from Index Globe’s own account. Before collecting payment, an operator records that invoice ID, its agreed amount in minor units and lowercase currency against the matching pilot request. The signed event must match all three fields before the workspace records payment. Stripe events do not activate an electricity contract. Separate live webhook configuration is required before accepting live pilot payments.
+Point your browser to the URL displayed in the terminal (e.g. `http://localhost:5173/`). You should see the RedwoodSDK welcome page in your browser.
+
+## Further Reading
+
+- [RedwoodSDK Documentation](https://docs.rwsdk.com/)
+- [Cloudflare Workers Documentation](https://developers.cloudflare.com/workers)

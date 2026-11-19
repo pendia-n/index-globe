@@ -1,18 +1,29 @@
 {
+  // Schema reference for wrangler configuration
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "index-globe",
+
+  // Name of your worker
+  "name": "__change_me__",
+
+  // Entry point for your worker
   "main": "src/worker.tsx",
+
+  // Compatibility settings
   "compatibility_date": "2025-08-21",
   "compatibility_flags": ["nodejs_compat"],
-  "assets": { "binding": "ASSETS" },
-  "observability": { "enabled": true },
-  "d1_databases": [
-    {
-      "binding": "DB",
-      "database_name": "index-globe-db",
-      "database_id": "ece2e2d3-f1a4-4e81-bd08-5cced10301a3",
-      "migrations_dir": "migrations"
-    }
-  ],
-  "r2_buckets": [{ "binding": "DOCUMENTS", "bucket_name": "index-globe-documents" }]
+
+  // Assets configuration
+  "assets": {
+    "binding": "ASSETS"
+  },
+
+  // Observability settings
+  "observability": {
+    "enabled": true
+  },
+
+  // Environment variables
+  "vars": {
+    // Add your environment variables here
+  }
 }

@@ -1,3 +1,0 @@
-ALTER TABLE deals ADD COLUMN agreed_by TEXT REFERENCES users(id);
-ALTER TABLE deals ADD COLUMN agreed_at INTEGER;
-ALTER TABLE deals ADD COLUMN reviewed_at INTEGER;
