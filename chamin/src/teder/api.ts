@@ -1,6 +1,8 @@
 import { z } from 'zod'
 import { clearCookie, createSession, digest, isRecoveryCode, matchesPassword, normalizeCode, passwordHash, readSession } from './security'
 import type { Bindings } from './security'
+import { findRegistry, registryNumber, seatLimit } from './registries'
+import { sources } from './products'
 
 class Failure extends Error { constructor(message: string, public status = 400) { super(message) } }
 const text = (max: number) => z.string().trim().min(1).max(max)
@@ -11,7 +13,7 @@ const code = z.string().max(100).refine(isRecoveryCode)
 const moment = z.number().int().min(0).max(4102444800000)
 const id = () => crypto.randomUUID()
 type User = { id: string; username: string; company_id: string; company_name: string; status: string; role: string; reviewer: number; auth_version: number }
-type Deal = { id: string; buyer_id: string; seller_id: string; request_id: string; start_at: number; end_at: number; agreement_ref: string | null; buyer_signed_at: number | null; seller_signed_at: number | null; schedule_ref: string | null; current_delivery_id: string | null; delivery_status: string | null }
+type Deal = { id: string; buyer_id: string; seller_id: string; request_id: string; start_at: number; end_at: number; agreement_ref: string | null; buyer_signed_at: number | null; seller_signed_at: number | null; schedule_ref: string | null; current_delivery_id: string | null; delivery_status: string | null; kw: number }
 type Val = string | number | null
 function response(data: unknown, status = 200, cookie?: string) {
   const headers = new Headers({ 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' })
@@ -61,7 +63,7 @@ export async function tederApi(req: Request, env: Bindings): Promise<Response> {
     }
     if (action === 'register') {
       await quota(env, action, ip, 20, 3600000)
-      const input = z.object({ username, password, code, recoveryConfirmation: code, saved: z.literal(true), company: z.string().trim().max(120).optional(), registration: z.string().trim().toUpperCase().max(80).optional(), invite: z.string().trim().max(100).optional() }).parse(body)
+      const input = z.object({ username, password, code, recoveryConfirmation: code, saved: z.literal(true), company: z.string().trim().max(120).optional(), registration: z.string().trim().max(80).optional(), country: z.string().max(2).optional(), registryRegion: z.string().max(3).optional(), invite: z.string().trim().max(100).optional() }).parse(body)
       if (normalizeCode(input.code) !== normalizeCode(input.recoveryConfirmation)) throw new Failure('Paste the recovery code you copied.')
       const userId = id()
       if (await statement('SELECT id FROM users WHERE username=?', input.username).first()) throw new Failure('That username is taken.', 409)
@@ -71,16 +73,26 @@ export async function tederApi(req: Request, env: Bindings): Promise<Response> {
           const invite = await digest(secret, 'invite', input.invite)
           const [result] = await db.batch([
             statement(`INSERT INTO users (id,username,password_hash,recovery_hash,company_id,role)
-              SELECT ?,?,?,?,company_id,role FROM staff_invites WHERE hash=? AND used_by IS NULL AND expires_at>?`,
-              userId, input.username, hashed, recovery, invite, now),
+              SELECT ?,?,?,?,company_id,role FROM staff_invites i WHERE hash=? AND used_by IS NULL AND expires_at>?
+              AND (SELECT count(*) FROM users WHERE company_id=i.company_id)<?`,
+              userId, input.username, hashed, recovery, invite, now, seatLimit),
             statement('UPDATE staff_invites SET used_by=? WHERE hash=? AND used_by IS NULL AND EXISTS (SELECT 1 FROM users WHERE id=?)', userId, invite, userId),
           ])
-          if (!result.meta.changes) throw new Failure('This team invitation is invalid or expired.', 409)
+          if (!result.meta.changes) throw new Failure('This invitation is unavailable. Ask the company owner for a current link and available seat.', 409)
         } else {
-          if (!input.company || !input.registration) throw new Failure('Enter the company name and registration number.')
+          const country = input.country ?? ''
+          const region = input.registryRegion ?? ''
+          const registry = findRegistry(country)
+          const number = registryNumber(country, input.registration ?? '')
+          if (!input.company || !registry) throw new Failure('Enter the legal company name and select a supported registration jurisdiction.')
+          if (registry.regions.length ? !registry.regions.some(([code]) => code === region) : region !== '') {
+            throw new Failure('Choose the correct issuing jurisdiction.')
+          }
+          if (!registry.pattern.test(number)) throw new Failure('Check the registered company identifier.')
           const companyId = id()
           await db.batch([
-            statement('INSERT INTO companies (id,name,registration) VALUES (?,?,?)', companyId, input.company, input.registration),
+            statement('INSERT INTO companies (id,name,registration,country,registry_region,registry_number) VALUES (?,?,?,?,?,?)',
+              companyId, input.company, 'registry:' + companyId, country, region, number),
             statement(`INSERT INTO users (id,username,password_hash,recovery_hash,company_id,role) VALUES (?,?,?,?,?,'owner')`, userId, input.username, hashed, recovery, companyId),
           ])
         }
@@ -133,31 +145,62 @@ export async function tederApi(req: Request, env: Bindings): Promise<Response> {
         input.result, user.id, now, input.note, input.companyId, org)
       return response({ ok: true })
     }
-    if (action === 'invite') {
-      if (user.role !== 'owner') throw new Failure('Only the company owner can invite staff.', 403)
+    if (action === 'team') return response({
+      members: await all("SELECT username,role FROM users WHERE company_id=? ORDER BY role<>'owner', username", org),
+      invites: user.role === 'owner' ? await all('SELECT invite_id,role,expires_at FROM staff_invites WHERE company_id=? AND expires_at>? AND used_by IS NULL ORDER BY expires_at', org, now) : [],
+      seatLimit,
+    })
+    if (action === 'invite' || action === 'revokeInvite') {
+      if (user.role !== 'owner') throw new Failure('Only the company owner can manage invitations.', 403)
+      if (action === 'revokeInvite') {
+        const { inviteId } = z.object({ inviteId: z.string().regex(/^[a-f0-9-]{32,36}$/) }).parse(body)
+        await changed('UPDATE staff_invites SET expires_at=? WHERE company_id=? AND invite_id=? AND expires_at>? AND used_by IS NULL', now, org, inviteId, now)
+        return response({ ok: true })
+      }
       const role = z.object({ role: z.enum(['trader','operator','viewer']) }).parse(body).role
       const token = Array.from(crypto.getRandomValues(new Uint8Array(24)), v => v.toString(16).padStart(2, '0')).join('')
-      await statement('INSERT INTO staff_invites (hash,company_id,role,expires_at) VALUES (?,?,?,?)',
-        await digest(secret, 'invite', token), org, role, now + 86400000).run()
+      const result = await statement(`INSERT INTO staff_invites (hash,company_id,role,expires_at,invite_id)
+        SELECT ?,?,?,?,? WHERE (SELECT count(*) FROM users WHERE company_id=?) +
+          (SELECT count(*) FROM staff_invites WHERE company_id=? AND used_by IS NULL AND expires_at>?) < ?`,
+        await digest(secret, 'invite', token), org, role, now + 86400000, id(), org, org, now, seatLimit).run()
+      if (!result.meta.changes) throw new Failure('All five company seats are occupied or reserved by invitations.', 409)
       return response({ link: new URL('/register?invite=' + token, req.url).href })
     }
     if (action === 'overview') return response({
       user,
-      requests: await all(`SELECT r.*,b.name buyer_name,s.name seller_name,d.id deal_id FROM requests r
-        JOIN companies b ON b.id=r.buyer_id JOIN companies s ON s.id=r.seller_id LEFT JOIN deals d ON d.request_id=r.id
-        WHERE r.buyer_id=? OR r.seller_id=? ORDER BY r.created_at DESC LIMIT 250`, org, org),
+      requests: await all(`SELECT r.*,b.name buyer_name,s.name seller_name,d.id deal_id,t.tender_id,t.source,
+        CASE WHEN r.buyer_id=? AND t.tender_id IS NOT NULL THEN
+          (SELECT count(*) FROM tender_requests WHERE tender_id=t.tender_id) ELSE 1 END supplier_count,
+        CASE WHEN t.tender_id IS NOT NULL AND EXISTS(
+          SELECT 1 FROM tender_requests siblings JOIN deals awarded ON awarded.request_id=siblings.request_id
+          WHERE siblings.tender_id=t.tender_id) THEN 1 ELSE 0 END tender_closed
+        FROM requests r JOIN companies b ON b.id=r.buyer_id JOIN companies s ON s.id=r.seller_id
+        LEFT JOIN deals d ON d.request_id=r.id LEFT JOIN tender_requests t ON t.request_id=r.id
+        WHERE r.buyer_id=? OR r.seller_id=? ORDER BY r.created_at DESC, d.id IS NULL, r.id LIMIT 250`, org, org, org),
     })
     if (action === 'detail') {
       const input = z.object({ requestId: uuid }).parse(body)
-      const request = await statement(`SELECT r.*,b.name buyer_name,s.name seller_name FROM requests r
-        JOIN companies b ON b.id=r.buyer_id JOIN companies s ON s.id=r.seller_id
-        WHERE r.id=? AND (r.buyer_id=? OR r.seller_id=?)`, input.requestId, org, org).first()
+      const request = await statement(`SELECT r.*,b.name buyer_name,s.name seller_name,t.tender_id,t.source,
+        CASE WHEN t.tender_id IS NOT NULL AND EXISTS(
+          SELECT 1 FROM tender_requests siblings JOIN deals awarded ON awarded.request_id=siblings.request_id
+          WHERE siblings.tender_id=t.tender_id) THEN 1 ELSE 0 END tender_closed
+        FROM requests r JOIN companies b ON b.id=r.buyer_id JOIN companies s ON s.id=r.seller_id
+        LEFT JOIN tender_requests t ON t.request_id=r.id
+        WHERE r.id=? AND (r.buyer_id=? OR r.seller_id=?)`, input.requestId, org, org)
+        .first<{ buyer_id: string; tender_id: string | null }>()
       if (!request) throw new Failure('Request not found.', 404)
       const deal = await statement('SELECT * FROM deals WHERE request_id=?', input.requestId).first<{ id: string }>()
+      const comparison = request.buyer_id === org && request.tender_id ? await all(`SELECT r.id request_id,s.name seller_name,
+        s.status seller_status,d.id deal_id,o.id offer_id,o.kind,o.price_cents,o.expires_at,o.terms
+        FROM tender_requests t JOIN requests r ON r.id=t.request_id JOIN companies s ON s.id=r.seller_id
+        LEFT JOIN deals d ON d.request_id=r.id
+        LEFT JOIN offers o ON o.request_id=r.id AND o.revision=(SELECT max(revision) FROM offers WHERE request_id=r.id)
+        WHERE t.tender_id=? AND r.buyer_id=? ORDER BY s.name,r.id`, request.tender_id, org) : []
       return response({
-        request, deal,
+        request, deal, comparison,
         offers: await all('SELECT o.*,u.username FROM offers o JOIN users u ON u.id=o.actor_id WHERE request_id=? ORDER BY revision DESC', input.requestId),
-        deliveries: deal ? await all('SELECT * FROM deliveries WHERE deal_id=? ORDER BY reported_at DESC', deal.id) : [],
+        deliveries: deal ? await all(`SELECT d.*,i.readings_wh FROM deliveries d LEFT JOIN delivery_intervals i ON i.delivery_id=d.id
+          WHERE d.deal_id=? ORDER BY d.reported_at DESC`, deal.id) : [],
         events: deal ? await all('SELECT e.*,u.username FROM deal_events e JOIN users u ON u.id=e.actor_id WHERE deal_id=? ORDER BY occurred_at', deal.id) : [],
       })
     }
@@ -165,17 +208,37 @@ export async function tederApi(req: Request, env: Bindings): Promise<Response> {
     const trader = () => { if (user.role !== 'owner' && user.role !== 'trader') throw new Failure('Trader access required.', 403) }
     const owner = () => { if (user.role !== 'owner') throw new Failure('Only the company owner can authorize this action.', 403) }
     const operator = () => { if (user.role !== 'owner' && user.role !== 'operator') throw new Failure('Operator access required.', 403) }
+    if (action === 'suppliers') {
+      trader()
+      return response({ suppliers: await all("SELECT id,name,country FROM companies WHERE status='approved' AND id<>? ORDER BY name,id LIMIT 200", org) })
+    }
     if (action === 'request') {
       trader()
-      const input = z.object({ seller: username, point: text(120), requirements: text(1700), startAt: moment, endAt: moment, closesAt: moment, kw: z.number().int().positive().max(1000000) }).parse(body)
+      const input = z.object({ seller: username.optional(), supplierIds: z.array(uuid).min(1).max(10).optional(),
+        source: z.enum(Object.keys(sources) as [keyof typeof sources, ...(keyof typeof sources)[]]).default('any'),
+        point: text(120), requirements: text(1700), startAt: moment, endAt: moment, closesAt: moment,
+        kw: z.number().int().positive().max(1000000) }).parse(body)
       if (!(now < input.closesAt && input.closesAt <= input.startAt && input.startAt < input.endAt) ||
           input.endAt - input.startAt > 30 * 86400000 ||
           input.startAt % 1800000 || input.endAt % 1800000) throw new Failure('Use a future deadline and a delivery window on half-hour boundaries.')
-      const seller = await statement(`SELECT c.id FROM users u JOIN companies c ON c.id=u.company_id WHERE u.username=? AND u.role='owner' AND c.status='approved' AND c.id<>?`, input.seller, org).first<{ id: string }>()
-      if (!seller) throw new Failure('Enter a different approved supplier company owner’s username.', 404)
-      const requestId = id()
-      await statement('INSERT INTO requests VALUES (?,?,?,?,?,?,?,?,?,?,?)', requestId, org, seller.id, user.id, input.point, input.startAt, input.endAt, input.closesAt, input.kw, input.requirements, now).run()
-      return response({ requestId }, 201)
+      let supplierIds = [...new Set(input.supplierIds)]
+      if (!supplierIds.length && input.seller) {
+        const seller = await statement(`SELECT c.id FROM users u JOIN companies c ON c.id=u.company_id
+          WHERE u.username=? AND u.role='owner' AND c.status='approved' AND c.id<>?`, input.seller, org).first<{ id: string }>()
+        if (seller) supplierIds = [seller.id]
+      }
+      if (!supplierIds.length) throw new Failure('Choose at least one approved supplier.', 400)
+      const tenderId = id()
+      const invitees = supplierIds.map(seller => ({ seller, requestId: id() }))
+      const eligible = await all(`SELECT id FROM companies WHERE status='approved' AND id<>? AND id IN (${supplierIds.map(() => '?').join(',')})`, org, ...supplierIds)
+      if (eligible.length !== invitees.length) throw new Failure('One or more suppliers are unavailable. Refresh and choose again.', 409)
+      await db.batch(invitees.flatMap(({ requestId, seller }) => [
+        statement(`INSERT INTO requests (id,buyer_id,seller_id,created_by,point,start_at,end_at,closes_at,kw,requirements,created_at)
+          SELECT ?,?,c.id,?,?,?,?,?,?,?,? FROM companies c JOIN companies b ON b.id=? WHERE c.id=? AND c.status='approved' AND b.status='approved'`,
+          requestId, org, user.id, input.point, input.startAt, input.endAt, input.closesAt, input.kw, input.requirements, now, org, seller),
+        statement('INSERT INTO tender_requests (request_id,tender_id,source) VALUES (?,?,?)', requestId, tenderId, input.source),
+      ]))
+      return response({ requestId: invitees[0].requestId }, 201)
     }
     if (action === 'offer') {
       trader()
@@ -186,6 +249,8 @@ export async function tederApi(req: Request, env: Bindings): Promise<Response> {
         WHERE r.id=? AND r.closes_at>? AND r.closes_at>=? AND b.status='approved' AND s.status='approved'
         AND CASE WHEN ?='counter' THEN r.buyer_id=? AND ?>0 ELSE r.seller_id=? END
         AND NOT EXISTS(SELECT 1 FROM deals WHERE request_id=r.id)
+        AND NOT EXISTS(SELECT 1 FROM tender_requests t JOIN tender_requests sibling ON sibling.tender_id=t.tender_id
+          JOIN deals d ON d.request_id=sibling.request_id WHERE t.request_id=r.id)
         AND coalesce((SELECT max(revision) FROM offers WHERE request_id=r.id),0)=?`,
         id(), i.expected, user.id, i.kind, i.priceCents, i.terms, i.expiresAt, now,
         i.requestId, now, i.expiresAt, i.kind, org, i.expected, org, i.expected)
@@ -198,12 +263,14 @@ export async function tederApi(req: Request, env: Bindings): Promise<Response> {
         SELECT ?,r.id,o.id,?,? FROM offers o JOIN requests r ON r.id=o.request_id JOIN companies s ON s.id=r.seller_id
         WHERE o.id=? AND r.buyer_id=? AND s.status='approved' AND o.kind='firm' AND o.expires_at>? AND r.closes_at>?
         AND o.revision=(SELECT max(revision) FROM offers WHERE request_id=r.id)
+        AND NOT EXISTS(SELECT 1 FROM tender_requests t JOIN tender_requests sibling ON sibling.tender_id=t.tender_id
+          JOIN deals d ON d.request_id=sibling.request_id WHERE t.request_id=r.id)
         ON CONFLICT(request_id) DO NOTHING`, id(), user.id, now, offerId, org, now, now)
       return response({ ok: true })
     }
 
     const dealId = z.object({ dealId: uuid }).parse(body).dealId
-    const deal = await statement(`SELECT d.*,r.buyer_id,r.seller_id,r.start_at,r.end_at FROM deals d JOIN requests r ON r.id=d.request_id
+    const deal = await statement(`SELECT d.*,r.buyer_id,r.seller_id,r.start_at,r.end_at,r.kw FROM deals d JOIN requests r ON r.id=d.request_id
       WHERE d.id=? AND (r.buyer_id=? OR r.seller_id=?)`, dealId, org, org).first<Deal>()
     if (!deal) throw new Failure('Deal not found.', 404)
     const buyer = org === deal.buyer_id
@@ -229,12 +296,19 @@ export async function tederApi(req: Request, env: Bindings): Promise<Response> {
     } else if (action === 'delivery') {
       operator()
       if (buyer || !deal.schedule_ref || now < deal.end_at) throw new Failure('The seller can report delivery after the scheduled window ends.', 403)
-      const i = z.object({ reference: text(300), issuer: text(120), wh: z.number().int().min(0).max(1e12), previous: uuid.nullable() }).parse(body)
+      const i = z.object({ reference: text(300), issuer: text(120), wh: z.number().int().min(0).max(1e12),
+        previous: uuid.nullable(), readingsWh: z.array(z.number().int().min(0).max(1e12)).max(1440).optional() }).parse(body)
+      if (i.readingsWh && (i.readingsWh.length !== (deal.end_at - deal.start_at) / 1800000 ||
+          i.readingsWh.reduce((sum, reading) => sum + reading, 0) !== i.wh)) {
+        throw new Failure('Provide one reading per half-hour, with readings that add up to the reported total.')
+      }
       const entry = id()
       const results = await db.batch([
         statement(`INSERT INTO deliveries SELECT ?,id,?,?,?,?,? FROM deals WHERE id=? AND schedule_ref IS NOT NULL
           AND current_delivery_id IS ? AND (delivery_status IS NULL OR delivery_status='disputed')`,
           entry, user.id, i.issuer, i.reference, i.wh, now, deal.id, i.previous),
+        ...(i.readingsWh ? [statement(`INSERT INTO delivery_intervals (delivery_id,readings_wh)
+          SELECT id,? FROM deliveries WHERE id=?`, JSON.stringify(i.readingsWh), entry)] : []),
         statement(`UPDATE deals SET current_delivery_id=?,delivery_status='reported',review_note=NULL,reviewed_by=NULL,reviewed_at=NULL WHERE id=?
           AND EXISTS(SELECT 1 FROM deliveries WHERE id=?)`, entry, deal.id, entry),
         record('delivery reported', i.issuer + ' · ' + i.reference),

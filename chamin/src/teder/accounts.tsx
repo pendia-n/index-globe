@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { call, field } from './client'
 import { Copy, Form, Input } from './forms'
+import { findRegistry, registries, registryNumber } from './registries'
 
 function newCode() {
   return Array.from(crypto.getRandomValues(new Uint8Array(20)), value => value.toString(16).padStart(2, '0')).join('').match(/.{5}/g)!.join('-')
@@ -31,6 +32,11 @@ export function Account({ page, signedIn }: { page: string; signedIn: () => void
   const [identified, setIdentified] = useState(false)
   const [invite, setInvite] = useState('')
   const [message, setMessage] = useState('')
+  const [country, setCountry] = useState('')
+  const [registration, setRegistration] = useState('')
+  const registry = findRegistry(country)
+  const registryValid = registry?.pattern.test(registryNumber(country, registration))
+
   const register = page === '/register'
   const recovery = page === '/recovery'
   useEffect(() => {
@@ -51,8 +57,9 @@ export function Account({ page, signedIn }: { page: string; signedIn: () => void
   return <section className="auth-panel">
     <a className="eyebrow" href="/">Teder / Company access</a>
     <h1>{register ? (invite ? 'Join your company' : 'Register your company') : recovery ? 'Recover your account' : 'Sign in'}</h1>
+    {register && <p>{invite ? 'Create your own username and recovery code to join the workspace.' : 'Register one workspace for your legal entity. Already have a Teder workspace? Ask your company owner for your own invitation link.'}</p>}
     {message ? <><p role="status">{message}</p><a className="button" href="/login">Go to sign in</a></> : <Form key={String(identified)} submit={recovery ? (identified ? 'Reset password' : 'Continue') : register ? 'Register' : 'Sign in'}
-      disabled={(register && availability === 'Username is taken') || ((register || (recovery && identified)) && !code)}
+      disabled={(register && availability === 'Username is taken') || ((register || (recovery && identified)) && !code) || (register && !invite && !registryValid)}
       onSubmit={async data => {
         if (recovery && !identified) { setIdentified(true); return }
         if (register || recovery) {
@@ -60,7 +67,7 @@ export function Account({ page, signedIn }: { page: string; signedIn: () => void
         }
         await call(recovery ? 'recover' : register ? 'register' : 'login', {
           username: name, saved: data.has('saved'), password: field(data, 'password'), code, recoveryConfirmation: field(data, 'recoveryConfirmation'),
-          company: field(data, 'company'), registration: field(data, 'registration'), invite, oldCode: field(data, 'oldCode'),
+          company: field(data, 'company'), country, registryRegion: field(data, 'registryRegion'), registration, invite, oldCode: field(data, 'oldCode'),
         })
         if (recovery) {
           setCode('')
@@ -70,7 +77,27 @@ export function Account({ page, signedIn }: { page: string; signedIn: () => void
       {recovery && identified ? <p className="username"><strong>{name}</strong> <button type="button" className="secondary" onClick={() => { setIdentified(false); setCode('') }}>Change username</button></p> :
         <Input label="Username" name="username" placeholder="3–32 letters, numbers, dots or dashes" autoComplete="username" minLength={3} maxLength={32} pattern="[A-Za-z0-9][A-Za-z0-9_.\-]{2,31}" value={name} onChange={e => { setName(e.target.value); setAvailability('') }} />}
       {register && availability && <small role="status">{availability}</small>}
-      {register && !invite && <div className="pair"><Input label="Legal company name" name="company" maxLength={120} /><Input label="Company registration number" name="registration" maxLength={80} /></div>}
+      {register && !invite && <>
+        <Input label="Legal company name" name="company" autoComplete="organization" maxLength={120} />
+        <label>Country or territory of registration
+          <select name="country" autoComplete="country" required value={country} onChange={event => { setCountry(event.target.value); setRegistration('') }}>
+            <option value="">Choose where your company is registered</option>
+            {Object.entries(registries).map(([key, item]) => <option key={key} value={key}>{item.name}</option>)}
+            <option value="other">Other jurisdiction</option>
+          </select>
+        </label>
+        {country === 'other' && <p className="notice">This registry is outside the current signup coverage. Ask your Teder pilot contact about registering it.</p>}
+        {registry && <>
+          {registry.regions.length > 0 && <label>{country === 'US' ? 'State or territory of formation' : 'Issuing registry'}
+            <select key={country} name="registryRegion" required defaultValue="">
+              <option value="">Choose the issuing jurisdiction</option>
+              {registry.regions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+            </select>
+          </label>}
+          <Input label={registry.label} name="registration" maxLength={80} value={registration} onChange={event => setRegistration(event.target.value)} spellCheck={false} aria-describedby="registry-hint" aria-invalid={!!registration && !registryValid} />
+          <small id="registry-hint" className="registry-hint">{registry.hint}{registration && !registryValid && ' Check the format before continuing.'}</small>
+        </>}
+      </>}
       {recovery && identified && <Input label="Current recovery code" name="oldCode" autoComplete="off" maxLength={100} />}
       {(!recovery || identified) && <Password newPassword={register || recovery} />}
       {(register || (recovery && identified)) && <RecoveryFields key={code} code={code} replace={setCode} />}

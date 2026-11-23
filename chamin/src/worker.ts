@@ -1,5 +1,6 @@
 import entry from '@tanstack/react-start/server-entry'
 import { tederApi } from './teder/api'
+import { accountPages, isWorkspacePath, publicPages } from './teder/paths'
 import type { Bindings } from './teder/security'
 
 export default {
@@ -10,7 +11,9 @@ export default {
       return new Response('Not found', { status: 404 })
     }
     const response = await entry.fetch(request)
-    const secured = new Response(response.body, response)
+    const pagePath = pathname.replace(/\/+$/, '') || '/'
+    const known = pagePath === '/' || accountPages.includes(pagePath) || publicPages.includes(pagePath) || isWorkspacePath(pagePath)
+    const secured = new Response(response.body, { headers: response.headers, status: response.ok && !known ? 404 : response.status })
     secured.headers.set('Referrer-Policy', 'no-referrer')
     secured.headers.set('X-Frame-Options', 'DENY')
     secured.headers.set('X-Content-Type-Options', 'nosniff')
