@@ -1,0 +1,15 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "teder",
+  "main": "src/worker.ts",
+  "compatibility_date": "2025-09-02",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "observability": { "enabled": true },
+  "d1_databases": [{
+    "binding": "DB",
+    "database_name": "teder-v1",
+    "database_id": "11df4b48-cb53-4847-b855-80b240a1ecbd",
+    "migrations_dir": "migrations"
+  }]
+}
