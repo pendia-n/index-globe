@@ -177,8 +177,8 @@ export async function tederApi(req: Request, env: Bindings): Promise<Response> {
         CASE WHEN ?=1 THEN e.work_email END work_email,
         p.name port,e.grade,e.quantity_kg,e.arrival_at,e.end_at,e.buyer_company_id,e.declined_at
         FROM bunker_enquiries e JOIN bunker_ports p ON p.code=e.port_code
-        WHERE e.buyer_company_id=? OR ?=1 ORDER BY e.created_at DESC LIMIT 100`,
-        user.bunker_operator, org, user.bunker_operator) })
+        WHERE e.buyer_company_id=? OR ?=1 OR EXISTS (SELECT 1 FROM bunker_invitations i WHERE i.enquiry_id=e.id AND i.supplier_id=?) ORDER BY e.created_at DESC LIMIT 100`,
+        user.bunker_operator, org, user.bunker_operator, org) })
     }
     if (action === 'bunkerAssign' || action === 'bunkerDecline') {
       if (!user.bunker_operator) throw new Failure('Teder operations access required.', 403)
@@ -196,6 +196,107 @@ export async function tederApi(req: Request, env: Bindings): Promise<Response> {
         await changed(`UPDATE bunker_enquiries SET buyer_company_id=?,assigned_by=?,assigned_at=?
           WHERE id=? AND buyer_company_id IS NULL AND declined_at IS NULL AND ${operatorCheck}`,
           buyer.company_id, user.id, now, input.enquiryId, user.id)
+      }
+      return response({ ok: true })
+    }
+    if (action === 'bunkerCoverage') {
+      if (!user.bunker_operator) throw new Failure('Teder operations access required.', 403)
+      const input = z.object({ port: text(5), enabled: z.boolean() }).parse(body)
+      await changed(`UPDATE bunker_ports SET active=? WHERE code=? AND EXISTS
+        (SELECT 1 FROM bunker_operators WHERE user_id=? AND revoked_at IS NULL)`, Number(input.enabled), input.port, user.id)
+      return response({ ok: true })
+    }
+    if (action === 'bunkerApproveSupplier') {
+      if (!user.bunker_operator) throw new Failure('Teder operations access required.', 403)
+      const input = z.object({ port: text(5), supplier: username, licence: text(200), validUntil: moment }).parse(body)
+      if (input.validUntil <= now) throw new Failure('Enter a future licence expiry.')
+      await changed(`INSERT INTO bunker_supplier_eligibility (port_code,company_id,licence_reference,valid_until,approved_by)
+        SELECT p.code,c.id,?,?,? FROM users u JOIN companies c ON c.id=u.company_id
+        JOIN bunker_ports p ON p.code=? WHERE u.username=? AND u.role='owner' AND c.status='approved'
+        AND EXISTS (SELECT 1 FROM bunker_operators WHERE user_id=? AND revoked_at IS NULL)
+        ON CONFLICT(port_code,company_id) DO UPDATE SET licence_reference=excluded.licence_reference,
+          valid_until=excluded.valid_until,approved_by=excluded.approved_by`,
+        input.licence, input.validUntil, user.id, input.port, input.supplier, user.id)
+      return response({ ok: true })
+    }
+    if (action === 'bunkerDetail') {
+      const { enquiryId } = z.object({ enquiryId: uuid }).parse(body)
+      const enquiry = await statement(`SELECT e.id,e.company_name,e.grade,e.quantity_kg,e.arrival_at,e.end_at,e.vessel,e.imo,
+        e.specification,e.buyer_company_id,p.name port,p.active
+        FROM bunker_enquiries e JOIN bunker_ports p ON p.code=e.port_code WHERE e.id=? AND
+        (e.buyer_company_id=? OR EXISTS (SELECT 1 FROM bunker_invitations WHERE enquiry_id=e.id AND supplier_id=?))`,
+        enquiryId, org, org).first<{ buyer_company_id: string }>()
+      if (!enquiry) throw new Failure('Request not found.', 404)
+      const buyer = enquiry.buyer_company_id === org
+      return response({ enquiry, buyer,
+        eligible: buyer ? await all(`SELECT c.id,c.name FROM bunker_enquiries e JOIN bunker_supplier_eligibility s ON s.port_code=e.port_code
+          JOIN companies c ON c.id=s.company_id WHERE e.id=? AND c.id<>? AND c.status='approved' AND s.valid_until>=?
+          ORDER BY c.name LIMIT 100`, enquiryId, org, now) : [],
+        invitations: await all(`SELECT i.supplier_id,c.name FROM bunker_invitations i JOIN companies c ON c.id=i.supplier_id
+          WHERE i.enquiry_id=? AND (?=1 OR i.supplier_id=?) ORDER BY c.name`, enquiryId, Number(buyer), org),
+        quotes: await all(`SELECT * FROM bunker_quotes WHERE enquiry_id=? AND (?=1 OR supplier_id=?) ORDER BY revision DESC`, enquiryId, Number(buyer), org),
+        orders: await all(`SELECT o.* FROM bunker_orders o JOIN bunker_quotes q ON q.id=o.quote_id
+          WHERE o.enquiry_id=? AND (?=1 OR q.supplier_id=?) ORDER BY o.selected_at DESC`, enquiryId, Number(buyer), org),
+      })
+    }
+    if (['bunkerPrepare','bunkerInvite','bunkerQuote','bunkerSelect','bunkerRespond'].includes(action)) {
+      if (user.status !== 'approved' || !['owner','trader'].includes(user.role)) {
+        throw new Failure('Approved trading access required.', 403)
+      }
+      if (action === 'bunkerPrepare') {
+        const i = z.object({ enquiryId: uuid, vessel: text(120), imo: z.string().regex(/^\d{7}$/), specification: text(1700) }).parse(body)
+        await changed(`UPDATE bunker_enquiries SET vessel=?,imo=?,specification=? WHERE id=? AND buyer_company_id=?
+          AND arrival_at>? AND NOT EXISTS (SELECT 1 FROM bunker_invitations WHERE enquiry_id=bunker_enquiries.id)`,
+          i.vessel, i.imo, i.specification, i.enquiryId, org, now)
+      }
+      if (action === 'bunkerInvite') {
+        const i = z.object({ enquiryId: uuid, supplierId: uuid }).parse(body)
+        await changed(`INSERT INTO bunker_invitations (enquiry_id,supplier_id,invited_at)
+          SELECT e.id,s.company_id,? FROM bunker_enquiries e JOIN bunker_ports p ON p.code=e.port_code
+          JOIN bunker_supplier_eligibility s ON s.port_code=e.port_code JOIN companies c ON c.id=s.company_id
+          WHERE e.id=? AND e.buyer_company_id=? AND e.vessel IS NOT NULL AND e.arrival_at>? AND p.active=1
+          AND s.company_id=? AND s.company_id<>? AND s.valid_until>=e.end_at AND c.status='approved'
+          AND NOT EXISTS(SELECT 1 FROM bunker_orders o WHERE o.enquiry_id=e.id AND o.status IN ('selected','confirmed'))
+          ON CONFLICT DO NOTHING`, now, i.enquiryId, org, now, i.supplierId, org)
+      }
+      if (action === 'bunkerQuote') {
+        const i = z.object({ enquiryId: uuid, supplierId: uuid, revision: z.number().int().nonnegative(), kind: z.enum(['firm','indicative','counter']),
+          price: z.number().int().positive().max(10000000), extras: z.number().int().min(0).max(1000000000), terms: text(1700), expiresAt: moment }).parse(body)
+        if (i.expiresAt <= now) throw new Failure('Quote expiry must be in the future.')
+        await changed(`INSERT INTO bunker_quotes
+          SELECT ?,e.id,i.supplier_id,?+1,?,?,?,?,?,?,? FROM bunker_invitations i JOIN bunker_enquiries e ON e.id=i.enquiry_id
+          JOIN bunker_ports p ON p.code=e.port_code JOIN bunker_supplier_eligibility s ON s.port_code=e.port_code AND s.company_id=i.supplier_id
+          JOIN companies c ON c.id=i.supplier_id JOIN companies b ON b.id=e.buyer_company_id
+          WHERE e.id=? AND i.supplier_id=? AND p.active=1 AND s.valid_until>=e.end_at AND c.status='approved' AND b.status='approved'
+          AND e.arrival_at>=? AND CASE WHEN ?='counter' THEN e.buyer_company_id=? AND ?>0 ELSE i.supplier_id=? END
+          AND NOT EXISTS(SELECT 1 FROM bunker_orders o WHERE o.enquiry_id=e.id AND o.status IN ('selected','confirmed'))
+          AND COALESCE((SELECT MAX(revision) FROM bunker_quotes WHERE enquiry_id=e.id AND supplier_id=i.supplier_id),0)=?`,
+          id(), i.revision, i.kind, i.price, i.extras, i.terms, i.expiresAt, user.id, now,
+          i.enquiryId, i.supplierId, i.expiresAt, i.kind, org, i.revision, org, i.revision)
+      }
+      if (action === 'bunkerSelect') {
+        if (user.role !== 'owner') throw new Failure('Buyer owner approval required.', 403)
+        const i = z.object({ quoteId: uuid }).parse(body)
+        await changed(`INSERT INTO bunker_orders (id,enquiry_id,quote_id,selected_by,selected_at,status)
+          SELECT ?,e.id,q.id,?,?,'selected' FROM bunker_quotes q JOIN bunker_enquiries e ON e.id=q.enquiry_id
+          JOIN bunker_ports p ON p.code=e.port_code JOIN bunker_supplier_eligibility s ON s.port_code=e.port_code AND s.company_id=q.supplier_id
+          JOIN companies c ON c.id=q.supplier_id WHERE q.id=? AND e.buyer_company_id=? AND c.status='approved'
+          AND p.active=1 AND s.valid_until>=e.end_at AND q.kind='firm' AND q.expires_at>? AND e.arrival_at>?
+          AND q.revision=(SELECT MAX(revision) FROM bunker_quotes WHERE enquiry_id=e.id AND supplier_id=q.supplier_id)
+          ON CONFLICT DO NOTHING`, id(), user.id, now, i.quoteId, org, now, now)
+      }
+      if (action === 'bunkerRespond') {
+        if (user.role !== 'owner') throw new Failure('Workspace owner approval required.', 403)
+        const i = z.object({ orderId: uuid, result: z.enum(['confirmed','declined','withdrawn']), reference: text(300) }).parse(body)
+        await changed(`UPDATE bunker_orders SET status=?,responded_by=?,responded_at=?,response_reference=?
+          WHERE id=? AND status='selected' AND EXISTS (
+            SELECT 1 FROM bunker_quotes q JOIN bunker_enquiries e ON e.id=q.enquiry_id
+            JOIN bunker_ports p ON p.code=e.port_code JOIN bunker_supplier_eligibility s ON s.port_code=e.port_code AND s.company_id=q.supplier_id
+            JOIN companies b ON b.id=e.buyer_company_id JOIN companies c ON c.id=q.supplier_id WHERE q.id=bunker_orders.quote_id
+            AND CASE WHEN ?='withdrawn' THEN e.buyer_company_id=? ELSE q.supplier_id=? END
+            AND (?<>'confirmed' OR (p.active=1 AND s.valid_until>=e.end_at AND q.expires_at>? AND e.arrival_at>?
+              AND b.status='approved' AND c.status='approved')))`,
+          i.result, user.id, now, i.reference, i.orderId, i.result, org, org, i.result, now, now)
       }
       return response({ ok: true })
     }

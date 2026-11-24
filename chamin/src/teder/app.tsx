@@ -3,7 +3,7 @@ import { useLocation } from '@tanstack/react-router'
 import { Account } from './accounts'
 import { call } from './client'
 import type { User } from './client'
-import { BunkerEnquiries, BunkerIntake } from './bunker'
+import { BunkerEnquiries, BunkerIntake, BunkerTender } from './bunker'
 import { Workspace } from './workspace'
 
 import { Brand, Information, Landing } from './public'
@@ -31,7 +31,7 @@ export function App() {
           <Account key={path} page={path} signedIn={() => location.assign('/workspace')} />) :
         publicPages.includes(path) ? <Information page={path} /> :
         isWorkspacePath(path) ?
-          user === undefined ? <p role="status">Loading workspace…</p> : user ? (path === '/workspace/bunkers' ? <BunkerEnquiries user={user} /> : <Workspace user={user} path={path} />) :
+          user === undefined ? <p role="status">Loading workspace…</p> : user ? (path === '/workspace/bunkers' ? <BunkerEnquiries user={user} /> : path.startsWith('/workspace/bunkers/') ? <BunkerTender user={user} id={path.split('/')[3]} /> : <Workspace user={user} path={path} />) :
           <section className="auth-panel"><h1>Company access</h1><p>Sign in to see your company’s private requests and deals.</p><a className="button" href="/login">Sign in</a></section> :
         <section className="auth-panel"><h1>Page not found</h1><a href="/">Go to Teder</a></section>}
     </main>

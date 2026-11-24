@@ -74,6 +74,7 @@ export function BunkerEnquiries({ user }: { user: User }) {
   return <section className="workspace">
     <h1>{user.bunker_operator ? 'Bunker enquiries' : 'Marine fuel requests'}</h1>
     <p><a href="/bunker">Submit or track a request</a></p>
+    {user.bunker_operator && <PortOperations />}
     {error && <p role="alert" className="error">{error}</p>}
     {!error && enquiries === null && <p role="status">Loading requests…</p>}
     {enquiries?.length === 0 && <p>There are no requests here yet.</p>}
@@ -82,6 +83,8 @@ export function BunkerEnquiries({ user }: { user: User }) {
       <p>{enquiry.company_name}{enquiry.work_email && ' · ' + enquiry.work_email}</p>
       <p>{new Date(enquiry.arrival_at).toISOString()} to {new Date(enquiry.end_at).toISOString()}</p>
       <p>{statuses[enquiry.declined_at ? 'declined' : enquiry.buyer_company_id ? 'assigned' : 'checking']}</p>
+      {enquiry.buyer_company_id === user.company_id || (!user.bunker_operator && !enquiry.declined_at) ?
+        <p><a href={'/workspace/bunkers/' + enquiry.id}>Open fuel request</a></p> : null}
       {user.bunker_operator && !enquiry.buyer_company_id && !enquiry.declined_at && <>
         <Form submit="Assign to buyer workspace" onSubmit={async data => {
           await call('bunkerAssign', { enquiryId: enquiry.id, buyer: field(data, 'buyer') })
@@ -93,5 +96,125 @@ export function BunkerEnquiries({ user }: { user: User }) {
         }}><label className="check"><input type="checkbox" required /> Confirm this request cannot be supported.</label></Form>
       </>}
     </article>)}
+  </section>
+}
+
+type Quote = { id: string; supplier_id: string; revision: number; kind: string; price_cents_per_tonne: number; extras_cents: number; terms: string; expires_at: number }
+type Supplier = { id: string; name: string }
+type Detail = {
+  enquiry: { grade: string; port: string; active: number; quantity_kg: number; arrival_at: number; end_at: number; vessel: string | null; imo: string | null; specification: string | null }
+  buyer: boolean
+  eligible: Supplier[]
+  invitations: { supplier_id: string; name: string }[]
+  quotes: Quote[]
+  orders: { id: string; quote_id: string; status: string; response_reference: string | null }[]
+}
+const usd = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' })
+const displayTime = (date: number) => new Intl.DateTimeFormat('en-GB', { dateStyle: 'medium', timeStyle: 'short', timeZone: 'UTC' }).format(date) + ' UTC'
+
+export function BunkerTender({ user, id }: { user: User; id: string }) {
+  const [detail, setDetail] = useState<Detail | null>(null)
+  const [error, setError] = useState('')
+  async function refresh() { setDetail(await call<Detail>('bunkerDetail', { enquiryId: id })) }
+  useEffect(() => { refresh().catch(err => setError(err.message)) }, [id])
+  async function act(action: string, data: Record<string, unknown>) {
+    await call(action, { enquiryId: id, ...data })
+    await refresh()
+  }
+  if (!detail) return <p role={error ? 'alert' : 'status'}>{error || 'Loading fuel request…'}</p>
+  const { enquiry, buyer, invitations, quotes, orders } = detail
+  const open = !orders.some(order => ['confirmed', 'selected'].includes(order.status)) && enquiry.arrival_at > Date.now()
+  const approved = user.status === 'approved' && ['owner','trader'].includes(user.role)
+  const remaining = detail.eligible.filter(s => !invitations.some(i => i.supplier_id === s.id))
+  return <section className="workspace">
+    <a href="/workspace/bunkers">Marine fuel requests</a>
+    <h1>{enquiry.port} · {enquiry.grade}</h1>
+    <p>{enquiry.quantity_kg / 1000} metric tonnes · {displayTime(enquiry.arrival_at)} to {displayTime(enquiry.end_at)}</p>
+    <p>{enquiry.vessel ? `${enquiry.vessel} · IMO ${enquiry.imo}` : 'Vessel details pending'}</p>
+    <p>{enquiry.specification}</p>
+    {!enquiry.active && <p role="status">This port is currently accepting coverage enquiries. Offers require an active route.</p>}
+    {!approved && <p>Company trading approval is required to take action on this request.</p>}
+    {buyer && approved && !invitations.length && open && <Form submit="Save vessel and terms" onSubmit={data => act('bunkerPrepare', {
+      vessel: field(data,'vessel'), imo: field(data,'imo'), specification: field(data,'specification'),
+    })}>
+      <Input label="Vessel name" name="vessel" maxLength={120} defaultValue={enquiry.vessel ?? ''} />
+      <Input label="IMO number" name="imo" pattern="[0-9]{7}" inputMode="numeric" defaultValue={enquiry.imo ?? ''} />
+      <Input label="Fuel specification, quantity tolerance and delivery instructions" name="specification" maxLength={1700} defaultValue={enquiry.specification ?? ''} />
+    </Form>}
+    {buyer && approved && enquiry.vessel && enquiry.active && open && (remaining.length ? <Form submit="Invite supplier" onSubmit={data =>
+      act('bunkerInvite', { supplierId: field(data,'supplier') })
+    }><label>Eligible supplier<select name="supplier" required>{remaining.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}</select></label></Form> :
+      <p>There are no additional eligible suppliers for this port.</p>)}
+    {invitations.map(invitation => {
+      const versions = quotes.filter(quote => quote.supplier_id === invitation.supplier_id)
+      const latest = versions[0]
+      return <article className="boxed" key={invitation.supplier_id}>
+        <h2>{invitation.name}</h2>
+        {versions.length === 0 && <p>Awaiting a quote</p>}
+        {versions.map(quote => <div key={quote.id}>
+          <h3>Revision {quote.revision} · {quote.kind}</h3>
+          <p>{usd.format(quote.price_cents_per_tonne / 100)} per tonne · extras {usd.format(quote.extras_cents / 100)}</p>
+          <p>Estimated total {usd.format((quote.price_cents_per_tonne * enquiry.quantity_kg / 1000 + quote.extras_cents) / 100)} · Valid through {displayTime(quote.expires_at)}</p>
+          <p>{quote.terms}</p>
+        </div>)}
+        {approved && enquiry.active && open && (!buyer || latest) && <Form key={latest?.id} submit={buyer ? 'Send counteroffer' : 'Submit quote'} onSubmit={data => act('bunkerQuote', {
+          supplierId: invitation.supplier_id, revision: latest?.revision ?? 0, kind: buyer ? 'counter' : field(data,'kind'),
+          price: Math.round(Number(field(data,'price')) * 100), extras: Math.round(Number(field(data,'extras')) * 100),
+          terms: field(data,'terms'), expiresAt: Date.parse(field(data,'expiry') + 'Z'),
+        })}>
+          {!buyer && <label>Quote type<select name="kind"><option value="indicative">Indicative</option><option value="firm">Firm</option></select></label>}
+          <Input label="Delivered price per tonne · USD" name="price" type="number" min=".01" step=".01" />
+          <Input label="Additional charges · USD" name="extras" type="number" min="0" step=".01" defaultValue="0" />
+          <Input label="Valid until · UTC" name="expiry" type="datetime-local" />
+          <Input label="Payment terms and operational conditions" name="terms" maxLength={1700} />
+        </Form>}
+        {buyer && approved && open && enquiry.active && user.role === 'owner' && latest?.kind === 'firm' && latest.expires_at > Date.now() &&
+          <Form submit="Select firm offer" onSubmit={() => act('bunkerSelect', { quoteId: latest.id })}>
+            <label className="check"><input type="checkbox" required /> I have checked the delivered price, credit terms, and delivery conditions.</label>
+          </Form>}
+      </article>
+    })}
+    {orders.map(order => <article className="boxed" key={order.id}>
+      <h2>Order · {order.status}</h2>
+      <p>{order.response_reference}</p>
+      {order.status === 'selected' && approved && user.role === 'owner' && <Form submit={buyer ? 'Withdraw selection' : 'Record supplier decision'} onSubmit={data =>
+        act('bunkerRespond',{ orderId: order.id, result: buyer ? 'withdrawn' : field(data,'result'), reference: field(data,'reference') })
+      }>
+        {!buyer && <label>Supplier decision<select name="result" required><option value="">Choose a decision</option><option value="confirmed">Confirm order</option><option value="declined">Decline order</option></select></label>}
+        <Input label={buyer ? 'Reason for withdrawal' : 'Confirmation reference or reason for decline'} name="reference" maxLength={300} />
+      </Form>}
+    </article>)}
+  </section>
+}
+
+
+function PortOperations() {
+  const [ports, setPorts] = useState<Port[]>([])
+  const [message, setMessage] = useState('')
+  async function refresh() { setPorts((await call<{ ports: Port[] }>('bunkerPorts')).ports) }
+  useEffect(() => { refresh().catch(err => setMessage(err.message)) }, [])
+  if (!ports.length) return message ? <p role="alert">{message}</p> : null
+  const options = ports.map(p => <option key={p.code} value={p.code}>{p.name} · {p.active ? 'active' : 'coverage enquiries'}</option>)
+  return <section className="boxed">
+    <h2>Port coverage</h2>
+    <Form submit="Save port status" onSubmit={async fields => {
+      await call('bunkerCoverage', { port: field(fields,'port'), enabled: field(fields,'state') === 'active' })
+      setMessage('Port status saved.')
+      await refresh()
+    }}>
+      <label>Port<select name="port">{options}</select></label>
+      <label>Availability<select name="state"><option value="enquiry">Coverage enquiries only</option><option value="active">Enable requests for quotes</option></select></label>
+    </Form>
+    <Form submit="Save supplier eligibility" onSubmit={async fields => {
+      await call('bunkerApproveSupplier', { port: field(fields,'port'), supplier: field(fields,'supplier'),
+        licence: field(fields,'licence'), validUntil: Date.parse(field(fields,'expiry') + 'T23:59:59Z') })
+      setMessage('Supplier eligibility saved.')
+    }}>
+      <label>Supplier port<select name="port">{options}</select></label>
+      <Input label="Supplier workspace owner username" name="supplier" maxLength={32} />
+      <Input label="Verified supplier licence reference" name="licence" maxLength={200} />
+      <Input label="Licence valid until · UTC" name="expiry" type="date" />
+    </Form>
+    {message && <p role="status">{message}</p>}
   </section>
 }
