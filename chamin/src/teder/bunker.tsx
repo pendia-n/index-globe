@@ -2,13 +2,15 @@ import { useEffect, useState } from 'react'
 import { call, field } from './client'
 import type { User } from './client'
 import { Copy, Form, Input } from './forms'
+import { BunkerFeePanel } from './bunker-fee-panel'
+import { BunkerDocumentPanel } from './bunker-document-panel'
 import { BunkerSettlement } from './bunker-settlement'
 import type { Fulfilment, FulfilmentEvent } from './bunker-fulfilment'
 
 type Port = { code: string; name: string; time_zone: string; active: number }
 type Enquiry = {
   id: string; company_name: string; work_email: string | null; port: string; grade: string
-  quantity_kg: number; arrival_at: number; end_at: number; buyer_company_id: string | null; declined_at: number | null
+  quantity_kg: number; arrival_at: number; end_at: number; buyer_company_id: string | null; declined_at: number | null; assigned_by: string | null
 }
 const statuses = {
   checking: 'Checking coverage',
@@ -85,7 +87,7 @@ export function BunkerEnquiries({ user }: { user: User }) {
       <p>{enquiry.company_name}{enquiry.work_email && ' · ' + enquiry.work_email}</p>
       <p>{new Date(enquiry.arrival_at).toISOString()} to {new Date(enquiry.end_at).toISOString()}</p>
       <p>{statuses[enquiry.declined_at ? 'declined' : enquiry.buyer_company_id ? 'assigned' : 'checking']}</p>
-      {enquiry.buyer_company_id === user.company_id || (!user.bunker_operator && !enquiry.declined_at) ?
+      {enquiry.buyer_company_id === user.company_id || (user.bunker_operator && enquiry.buyer_company_id && enquiry.assigned_by === user.id) || (!user.bunker_operator && !enquiry.declined_at) ?
         <p><a href={'/workspace/bunkers/' + enquiry.id}>Open fuel request</a></p> : null}
       {user.bunker_operator && !enquiry.buyer_company_id && !enquiry.declined_at && <>
         <Form submit="Assign to buyer workspace" onSubmit={async data => {
@@ -106,6 +108,7 @@ type Supplier = { id: string; name: string }
 type Detail = {
   enquiry: { grade: string; port: string; active: number; quantity_kg: number; arrival_at: number; end_at: number; vessel: string | null; imo: string | null; specification: string | null }
   buyer: boolean
+  coordinator: boolean
   eligible: Supplier[]
   invitations: { supplier_id: string; name: string }[]
   quotes: Quote[]
@@ -126,9 +129,9 @@ export function BunkerTender({ user, id }: { user: User; id: string }) {
     await refresh()
   }
   if (!detail) return <p role={error ? 'alert' : 'status'}>{error || 'Loading fuel request…'}</p>
-  const { enquiry, buyer, invitations, quotes, orders, fulfilments, fulfilmentEvents } = detail
+  const { enquiry, buyer, coordinator, invitations, quotes, orders, fulfilments, fulfilmentEvents } = detail
   const open = !orders.some(order => ['confirmed', 'selected'].includes(order.status)) && enquiry.arrival_at > Date.now()
-  const approved = user.status === 'approved' && ['owner','trader'].includes(user.role)
+  const approved = !coordinator && user.status === 'approved' && ['owner','trader'].includes(user.role)
   const remaining = detail.eligible.filter(s => !invitations.some(i => i.supplier_id === s.id))
   return <section className="workspace">
     <a href="/workspace/bunkers">Marine fuel requests</a>
@@ -137,7 +140,7 @@ export function BunkerTender({ user, id }: { user: User; id: string }) {
     <p>{enquiry.vessel ? `${enquiry.vessel} · IMO ${enquiry.imo}` : 'Vessel details pending'}</p>
     <p>{enquiry.specification}</p>
     {!enquiry.active && <p role="status">This port is currently accepting coverage enquiries. Offers require an active route.</p>}
-    {!approved && <p>Company trading approval is required to take action on this request.</p>}
+    {!approved && !coordinator && <p>Company trading approval is required to take action on this request.</p>}
     {buyer && approved && !invitations.length && open && <Form submit="Save vessel and terms" onSubmit={data => act('bunkerPrepare', {
       vessel: field(data,'vessel'), imo: field(data,'imo'), specification: field(data,'specification'),
     })}>
@@ -189,9 +192,13 @@ export function BunkerTender({ user, id }: { user: User; id: string }) {
         {!buyer && <label>Supplier decision<select name="result" required><option value="">Choose a decision</option><option value="confirmed">Confirm order</option><option value="declined">Decline order</option></select></label>}
         <Input label={buyer ? 'Reason for withdrawal' : 'Confirmation reference or reason for decline'} name="reference" maxLength={300} />
       </Form>}
+      {settlement && !coordinator && <BunkerDocumentPanel orderId={order.id} buyer={buyer}
+        canUpload={user.status === 'approved' && ['owner','operator'].includes(user.role)} />}
       {settlement && <BunkerSettlement record={settlement} events={fulfilmentEvents.filter(event => event.order_id === order.id)}
-        buyer={buyer} allowed={user.status === 'approved' && ['owner','operator'].includes(user.role)}
+        buyer={buyer} allowed={!coordinator && user.status === 'approved' && ['owner','operator'].includes(user.role)}
         apply={change => act('bunkerFulfil', { orderId: order.id, revision: settlement.revision, change })} />}
+      {settlement && <BunkerFeePanel key={settlement.revision} orderId={order.id}
+        canReport={!coordinator && ['owner','operator'].includes(user.role)} />}
     </article>})}
   </section>
 }

@@ -1,5 +1,5 @@
 export async function call<T>(action: string, params: Record<string, unknown> = {}): Promise<T> {
-  const response = await fetch('/api/teder', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...params, action }) })
+  const response = await fetch(action === 'bunkerUpload' ? '/api/teder?upload=bunker-document' : '/api/teder', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...params, action }) })
   const data = await response.json()
   if (!response.ok) {
     const message = (data as { error?: string }).error

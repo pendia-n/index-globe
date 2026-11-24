@@ -1,3 +1,5 @@
+import { bunkerFees } from './bunker-fees'
+import { bunkerDocuments, maxDocumentBytes } from './bunker-documents'
 import { applyBunkerFulfilment } from './bunker-fulfilment'
 import { z } from 'zod'
 import { clearCookie, createSession, digest, isRecoveryCode, matchesPassword, normalizeCode, passwordHash, readSession } from './security'
@@ -36,17 +38,33 @@ export async function tederApi(req: Request, env: Bindings): Promise<Response> {
     if (req.method !== 'POST') return response({ error: 'Use POST.' }, 405)
     if (req.headers.get('origin') !== new URL(req.url).origin) throw new Failure('Invalid request origin.', 403)
     if (!req.headers.get('content-type')?.startsWith('application/json')) throw new Failure('Send a JSON request.', 415)
-    if (Number(req.headers.get('content-length') ?? 0) > 24000) throw new Failure('Request is too large.', 413)
+    const documentUpload = new URL(req.url).searchParams.get('upload') === 'bunker-document'
+    const maxBodyBytes = documentUpload ? maxDocumentBytes / 3 * 4 + 4096 : 24000
+    if (Number(req.headers.get('content-length') ?? 0) > maxBodyBytes) throw new Failure('Request is too large.', 413)
     let body: unknown
     try {
-      const raw = await req.text()
-      if (raw.length > 24000) throw new Failure('Request is too large.', 413)
-      body = JSON.parse(raw)
+      const reader = req.body?.getReader()
+      if (!reader) throw new Failure('A JSON body is required.')
+      const decoder = new TextDecoder()
+      let received = 0
+      let raw = ''
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done) break
+        received += value.byteLength
+        if (received > maxBodyBytes) {
+          await reader.cancel()
+          throw new Failure('Request is too large.', 413)
+        }
+        raw += decoder.decode(value, { stream:true })
+      }
+      body = JSON.parse(raw + decoder.decode())
     } catch (error) {
       if (error instanceof Failure) throw error
       throw new Failure('Invalid request.')
     }
     const { action } = z.object({ action: text(40) }).parse(body)
+    if (documentUpload !== (action === 'bunkerUpload')) throw new Failure('Invalid upload endpoint.')
     const db = env.DB
     const secret = env.TEDER_JWT_SECRET
     const ip = req.headers.get('CF-Connecting-IP') ?? 'local'
@@ -176,7 +194,7 @@ export async function tederApi(req: Request, env: Bindings): Promise<Response> {
     if (action === 'bunkerEnquiries') {
       return response({ enquiries: await all(`SELECT e.id,e.company_name,
         CASE WHEN ?=1 THEN e.work_email END work_email,
-        p.name port,e.grade,e.quantity_kg,e.arrival_at,e.end_at,e.buyer_company_id,e.declined_at
+        p.name port,e.grade,e.quantity_kg,e.arrival_at,e.end_at,e.buyer_company_id,e.declined_at,e.assigned_by
         FROM bunker_enquiries e JOIN bunker_ports p ON p.code=e.port_code
         WHERE e.buyer_company_id=? OR ?=1 OR EXISTS (SELECT 1 FROM bunker_invitations i WHERE i.enquiry_id=e.id AND i.supplier_id=?) ORDER BY e.created_at DESC LIMIT 100`,
         user.bunker_operator, org, user.bunker_operator, org) })
@@ -220,6 +238,18 @@ export async function tederApi(req: Request, env: Bindings): Promise<Response> {
         input.licence, input.validUntil, user.id, input.port, input.supplier, user.id)
       return response({ ok: true })
     }
+    if (['bunkerFee','bunkerFeeIssue','bunkerFeeReport','bunkerFeeReceive'].includes(action)) {
+      return await bunkerFees(db, user, action, body, now)
+    }
+    if (action === 'bunkerDocuments' || action === 'bunkerDownload' || action === 'bunkerUpload') {
+      if (action === 'bunkerUpload') {
+        if (user.status !== 'approved' || !['owner','operator'].includes(user.role)) {
+          throw new Failure('Approved operations access required.', 403)
+        }
+        await quota(env, action, user.id, 40, 3600000)
+      }
+      return await bunkerDocuments(db, user, action, body, now)
+    }
     if (action === 'bunkerFulfil') {
       if (user.status !== 'approved' || !['owner','operator'].includes(user.role)) {
         throw new Failure('Approved operations access required.', 403)
@@ -229,27 +259,28 @@ export async function tederApi(req: Request, env: Bindings): Promise<Response> {
     if (action === 'bunkerDetail') {
       const { enquiryId } = z.object({ enquiryId: uuid }).parse(body)
       const enquiry = await statement(`SELECT e.id,e.company_name,e.grade,e.quantity_kg,e.arrival_at,e.end_at,e.vessel,e.imo,
-        e.specification,e.buyer_company_id,p.name port,p.active
+        e.specification,e.buyer_company_id,e.assigned_by,p.name port,p.active
         FROM bunker_enquiries e JOIN bunker_ports p ON p.code=e.port_code WHERE e.id=? AND
-        (e.buyer_company_id=? OR EXISTS (SELECT 1 FROM bunker_invitations WHERE enquiry_id=e.id AND supplier_id=?))`,
-        enquiryId, org, org).first<{ buyer_company_id: string }>()
+        (e.buyer_company_id=? OR (e.assigned_by=? AND ?=1) OR EXISTS (SELECT 1 FROM bunker_invitations WHERE enquiry_id=e.id AND supplier_id=?))`,
+        enquiryId, org, user.id, user.bunker_operator, org).first<{ buyer_company_id: string; assigned_by: string }>()
       if (!enquiry) throw new Failure('Request not found.', 404)
       const buyer = enquiry.buyer_company_id === org
+      const coordinator = !!user.bunker_operator && enquiry.assigned_by === user.id
       const fulfilments = await all(`SELECT f.* FROM bunker_fulfilment f JOIN bunker_orders o ON o.id=f.order_id
         JOIN bunker_quotes q ON q.id=o.quote_id WHERE o.enquiry_id=? AND (?=1 OR q.supplier_id=?)`,
-        enquiryId, Number(buyer), org)
+        enquiryId, Number(buyer || coordinator), org)
       const fulfilmentEvents = await all(`SELECT x.order_id,x.revision,x.event,x.details,x.created_at
         FROM bunker_fulfilment_events x JOIN bunker_orders o ON o.id=x.order_id JOIN bunker_quotes q ON q.id=o.quote_id
-        WHERE o.enquiry_id=? AND (?=1 OR q.supplier_id=?) ORDER BY x.revision`, enquiryId, Number(buyer), org)
-      return response({ enquiry, buyer, fulfilments, fulfilmentEvents,
+        WHERE o.enquiry_id=? AND (?=1 OR q.supplier_id=?) ORDER BY x.revision`, enquiryId, Number(buyer || coordinator), org)
+      return response({ enquiry, buyer, coordinator, fulfilments, fulfilmentEvents,
         eligible: buyer ? await all(`SELECT c.id,c.name FROM bunker_enquiries e JOIN bunker_supplier_eligibility s ON s.port_code=e.port_code
           JOIN companies c ON c.id=s.company_id WHERE e.id=? AND c.id<>? AND c.status='approved' AND s.valid_until>=?
           ORDER BY c.name LIMIT 100`, enquiryId, org, now) : [],
         invitations: await all(`SELECT i.supplier_id,c.name FROM bunker_invitations i JOIN companies c ON c.id=i.supplier_id
-          WHERE i.enquiry_id=? AND (?=1 OR i.supplier_id=?) ORDER BY c.name`, enquiryId, Number(buyer), org),
-        quotes: await all(`SELECT * FROM bunker_quotes WHERE enquiry_id=? AND (?=1 OR supplier_id=?) ORDER BY revision DESC`, enquiryId, Number(buyer), org),
+          WHERE i.enquiry_id=? AND (?=1 OR i.supplier_id=?) ORDER BY c.name`, enquiryId, Number(buyer || coordinator), org),
+        quotes: await all(`SELECT * FROM bunker_quotes WHERE enquiry_id=? AND (?=1 OR supplier_id=?) ORDER BY revision DESC`, enquiryId, Number(buyer || coordinator), org),
         orders: await all(`SELECT o.* FROM bunker_orders o JOIN bunker_quotes q ON q.id=o.quote_id
-          WHERE o.enquiry_id=? AND (?=1 OR q.supplier_id=?) ORDER BY o.selected_at DESC`, enquiryId, Number(buyer), org),
+          WHERE o.enquiry_id=? AND (?=1 OR q.supplier_id=?) ORDER BY o.selected_at DESC`, enquiryId, Number(buyer || coordinator), org),
       })
     }
     if (['bunkerPrepare','bunkerInvite','bunkerQuote','bunkerSelect','bunkerRespond'].includes(action)) {
