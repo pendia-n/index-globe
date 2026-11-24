@@ -1,3 +1,4 @@
+import { applyBunkerFulfilment } from './bunker-fulfilment'
 import { z } from 'zod'
 import { clearCookie, createSession, digest, isRecoveryCode, matchesPassword, normalizeCode, passwordHash, readSession } from './security'
 import type { Bindings } from './security'
@@ -219,6 +220,12 @@ export async function tederApi(req: Request, env: Bindings): Promise<Response> {
         input.licence, input.validUntil, user.id, input.port, input.supplier, user.id)
       return response({ ok: true })
     }
+    if (action === 'bunkerFulfil') {
+      if (user.status !== 'approved' || !['owner','operator'].includes(user.role)) {
+        throw new Failure('Approved operations access required.', 403)
+      }
+      return await applyBunkerFulfilment(db, user, body, now)
+    }
     if (action === 'bunkerDetail') {
       const { enquiryId } = z.object({ enquiryId: uuid }).parse(body)
       const enquiry = await statement(`SELECT e.id,e.company_name,e.grade,e.quantity_kg,e.arrival_at,e.end_at,e.vessel,e.imo,
@@ -228,7 +235,13 @@ export async function tederApi(req: Request, env: Bindings): Promise<Response> {
         enquiryId, org, org).first<{ buyer_company_id: string }>()
       if (!enquiry) throw new Failure('Request not found.', 404)
       const buyer = enquiry.buyer_company_id === org
-      return response({ enquiry, buyer,
+      const fulfilments = await all(`SELECT f.* FROM bunker_fulfilment f JOIN bunker_orders o ON o.id=f.order_id
+        JOIN bunker_quotes q ON q.id=o.quote_id WHERE o.enquiry_id=? AND (?=1 OR q.supplier_id=?)`,
+        enquiryId, Number(buyer), org)
+      const fulfilmentEvents = await all(`SELECT x.order_id,x.revision,x.event,x.details,x.created_at
+        FROM bunker_fulfilment_events x JOIN bunker_orders o ON o.id=x.order_id JOIN bunker_quotes q ON q.id=o.quote_id
+        WHERE o.enquiry_id=? AND (?=1 OR q.supplier_id=?) ORDER BY x.revision`, enquiryId, Number(buyer), org)
+      return response({ enquiry, buyer, fulfilments, fulfilmentEvents,
         eligible: buyer ? await all(`SELECT c.id,c.name FROM bunker_enquiries e JOIN bunker_supplier_eligibility s ON s.port_code=e.port_code
           JOIN companies c ON c.id=s.company_id WHERE e.id=? AND c.id<>? AND c.status='approved' AND s.valid_until>=?
           ORDER BY c.name LIMIT 100`, enquiryId, org, now) : [],

@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react'
 import { call, field } from './client'
 import type { User } from './client'
 import { Copy, Form, Input } from './forms'
+import { BunkerSettlement } from './bunker-settlement'
+import type { Fulfilment, FulfilmentEvent } from './bunker-fulfilment'
 
 type Port = { code: string; name: string; time_zone: string; active: number }
 type Enquiry = {
@@ -107,6 +109,8 @@ type Detail = {
   eligible: Supplier[]
   invitations: { supplier_id: string; name: string }[]
   quotes: Quote[]
+  fulfilments: Fulfilment[]
+  fulfilmentEvents: (FulfilmentEvent & { order_id: string })[]
   orders: { id: string; quote_id: string; status: string; response_reference: string | null }[]
 }
 const usd = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' })
@@ -122,7 +126,7 @@ export function BunkerTender({ user, id }: { user: User; id: string }) {
     await refresh()
   }
   if (!detail) return <p role={error ? 'alert' : 'status'}>{error || 'Loading fuel request…'}</p>
-  const { enquiry, buyer, invitations, quotes, orders } = detail
+  const { enquiry, buyer, invitations, quotes, orders, fulfilments, fulfilmentEvents } = detail
   const open = !orders.some(order => ['confirmed', 'selected'].includes(order.status)) && enquiry.arrival_at > Date.now()
   const approved = user.status === 'approved' && ['owner','trader'].includes(user.role)
   const remaining = detail.eligible.filter(s => !invitations.some(i => i.supplier_id === s.id))
@@ -174,7 +178,9 @@ export function BunkerTender({ user, id }: { user: User; id: string }) {
           </Form>}
       </article>
     })}
-    {orders.map(order => <article className="boxed" key={order.id}>
+    {orders.map(order => {
+      const settlement = fulfilments.find(f => f.order_id === order.id)
+      return <article className="boxed" key={order.id}>
       <h2>Order · {order.status}</h2>
       <p>{order.response_reference}</p>
       {order.status === 'selected' && approved && user.role === 'owner' && <Form submit={buyer ? 'Withdraw selection' : 'Record supplier decision'} onSubmit={data =>
@@ -183,7 +189,10 @@ export function BunkerTender({ user, id }: { user: User; id: string }) {
         {!buyer && <label>Supplier decision<select name="result" required><option value="">Choose a decision</option><option value="confirmed">Confirm order</option><option value="declined">Decline order</option></select></label>}
         <Input label={buyer ? 'Reason for withdrawal' : 'Confirmation reference or reason for decline'} name="reference" maxLength={300} />
       </Form>}
-    </article>)}
+      {settlement && <BunkerSettlement record={settlement} events={fulfilmentEvents.filter(event => event.order_id === order.id)}
+        buyer={buyer} allowed={user.status === 'approved' && ['owner','operator'].includes(user.role)}
+        apply={change => act('bunkerFulfil', { orderId: order.id, revision: settlement.revision, change })} />}
+    </article>})}
   </section>
 }
 
