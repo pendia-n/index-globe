@@ -120,7 +120,7 @@ type Detail = {
   quotes: Quote[]
   fulfilments: Fulfilment[]
   fulfilmentEvents: (FulfilmentEvent & { order_id: string })[]
-  orders: { id: string; quote_id: string; status: string; response_reference: string | null }[]
+  orders: { id: string; quote_id: string; status: string; cancelled_at: number | null; response_reference: string | null }[]
 }
 const usd = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' })
 const displayTime = (date: number) => new Intl.DateTimeFormat('en-GB', { dateStyle: 'medium', timeStyle: 'short', timeZone: 'UTC' }).format(date) + ' UTC'
@@ -244,7 +244,7 @@ export function BunkerTender({ user, id }: { user: User; id: string }) {
     {orders.map(order => {
       const settlement = fulfilments.find(f => f.order_id === order.id)
       return <article className="boxed" key={order.id}>
-      <h2>Order · {order.status}</h2>
+      <h2>Order · {order.cancelled_at ? 'cancelled' : order.status}</h2>
       <p>{order.response_reference}</p>
       {order.status === 'selected' && approved && !broker && user.role === 'owner' && <Form submit={buyer ? 'Withdraw selection' : 'Record supplier decision'} onSubmit={data =>
         act('bunkerRespond',{ orderId: order.id, result: buyer ? 'withdrawn' : field(data,'result'), reference: field(data,'reference') })
@@ -256,6 +256,7 @@ export function BunkerTender({ user, id }: { user: User; id: string }) {
         canUpload={user.status === 'approved' && ['owner','operator'].includes(user.role)} />}
       {settlement && <BunkerSettlement record={settlement} events={fulfilmentEvents.filter(event => event.order_id === order.id)}
         buyer={buyer} allowed={!coordinator && user.status === 'approved' && ['owner','operator'].includes(user.role)}
+        canCancel={!coordinator && user.status === 'approved' && user.role === 'owner'}
         apply={change => act('bunkerFulfil', { orderId: order.id, revision: settlement.revision, change })} />}
       {settlement && <BunkerFeePanel key={settlement.revision} orderId={order.id}
         canReport={!coordinator && ['owner','operator'].includes(user.role)} />}

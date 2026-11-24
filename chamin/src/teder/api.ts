@@ -396,8 +396,8 @@ export async function tederApi(req: Request, env: Bindings): Promise<Response> {
         invitations: await all(`SELECT i.supplier_id,c.name FROM bunker_invitations i JOIN companies c ON c.id=i.supplier_id
           WHERE i.enquiry_id=? AND (?=1 OR i.supplier_id=?) ORDER BY c.name`, enquiryId, Number(buyer || coordinator || broker), org),
         quotes: await all(`SELECT * FROM bunker_quotes WHERE enquiry_id=? AND (?=1 OR supplier_id=?) ORDER BY revision DESC`, enquiryId, Number(buyer || coordinator || broker), org),
-        orders: await all(`SELECT o.* FROM bunker_orders o JOIN bunker_quotes q ON q.id=o.quote_id
-          WHERE o.enquiry_id=? AND (?=1 OR q.supplier_id=?) ORDER BY o.selected_at DESC`, enquiryId, Number(buyer || coordinator || broker), org),
+        orders: await all(`SELECT o.*,f.cancelled_at FROM bunker_orders o JOIN bunker_quotes q ON q.id=o.quote_id
+          LEFT JOIN bunker_fulfilment f ON f.order_id=o.id WHERE o.enquiry_id=? AND (?=1 OR q.supplier_id=?) ORDER BY o.selected_at DESC`, enquiryId, Number(buyer || coordinator || broker), org),
       })
     }
     if (action === 'bunkerReviseRequest' || action === 'bunkerCancelRequest') {
