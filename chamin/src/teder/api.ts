@@ -215,6 +215,26 @@ export async function tederApi(req: Request, env: Bindings): Promise<Response> {
       await statement('DELETE FROM sessions WHERE id=? AND user_id=?', claims.sid, user.id).run()
       return response({ ok: true }, 200, clearCookie)
     }
+    if (action === 'tradeInbox' || action === 'tradeInboxRead') {
+      const visibility = '(n.company_id=? OR n.user_id=? OR (n.operations=1 AND ?=1))'
+      const visibilityArgs: Val[] = [org,user.id,user.bunker_operator]
+      const views = ['trade_notice_1','trade_notice_2','trade_notice_3','trade_notice_4','trade_notice_5']
+      if (action === 'tradeInboxRead') {
+        const { notificationId } = z.object({ notificationId:text(150) }).parse(body)
+        await db.batch(views.map(view => statement(`INSERT INTO trade_notification_reads (user_id,notification_id,read_at)
+          SELECT ?,n.id,? FROM ${view} n WHERE n.id=? AND ${visibility}
+          ON CONFLICT DO NOTHING`,user.id,now,notificationId,...visibilityArgs)))
+        return response({ok:true})
+      }
+      const results = await db.batch<{id:string; occurred_at:number; read_at:number|null}>(views.map(view => statement(
+        `SELECT n.id,n.kind,n.href,n.occurred_at,r.read_at FROM ${view} n
+         LEFT JOIN trade_notification_reads r ON r.notification_id=n.id AND r.user_id=?
+         WHERE ${visibility} AND n.occurred_at>? ORDER BY r.read_at IS NOT NULL,n.occurred_at DESC,n.id DESC LIMIT 100`,
+        user.id,...visibilityArgs,now-90*86400000)))
+      const notifications = results.flatMap(result => result.results).sort((a,b) =>
+        Number(!!a.read_at)-Number(!!b.read_at) || b.occurred_at-a.occurred_at || b.id.localeCompare(a.id))
+      return response({notifications:notifications.slice(0,100)})
+    }
     if (action === 'bunkerEnquiries') {
       return response({ enquiries: await all(`SELECT e.id,e.company_name,
         CASE WHEN ?=1 THEN e.work_email END work_email,
