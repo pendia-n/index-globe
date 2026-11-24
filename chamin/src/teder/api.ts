@@ -12,7 +12,7 @@ const password = z.string().min(12).max(18).regex(/[a-zA-Z]/).regex(/[0-9]/)
 const code = z.string().max(100).refine(isRecoveryCode)
 const moment = z.number().int().min(0).max(4102444800000)
 const id = () => crypto.randomUUID()
-type User = { id: string; username: string; company_id: string; company_name: string; status: string; role: string; reviewer: number; auth_version: number }
+type User = { id: string; username: string; company_id: string; company_name: string; status: string; role: string; reviewer: number; bunker_operator: number; auth_version: number }
 type Deal = { id: string; buyer_id: string; seller_id: string; request_id: string; start_at: number; end_at: number; agreement_ref: string | null; buyer_signed_at: number | null; seller_signed_at: number | null; schedule_ref: string | null; current_delivery_id: string | null; delivery_status: string | null; kw: number }
 type Val = string | number | null
 function response(data: unknown, status = 200, cookie?: string) {
@@ -55,6 +55,41 @@ export async function tederApi(req: Request, env: Bindings): Promise<Response> {
     const changed = async (sql: string, ...args: Val[]) => {
       const r = await statement(sql, ...args).run()
       if (!r.meta.changes) throw new Failure('This record changed or the action is unavailable. Refresh and try again.', 409)
+    }
+    if (action === 'bunkerPorts') {
+      return response({ ports: await all('SELECT code,name,time_zone,active FROM bunker_ports ORDER BY name') })
+    }
+    if (action === 'bunkerSubmit') {
+      await quota(env, action, ip, 12, 3600000)
+      const input = z.object({
+        requestKey: uuid, company: text(120), email: z.email().max(254),
+        port: text(5), grade: z.enum(['VLSFO', 'MGO']),
+        quantityKg: z.number().int().positive().max(50000000),
+        arrivalAt: moment, endAt: moment,
+      }).parse(body)
+      if (input.arrivalAt <= now || input.endAt <= input.arrivalAt) {
+        throw new Failure('Enter a future delivery window with an end after the start.')
+      }
+      if (!await statement('SELECT 1 FROM bunker_ports WHERE code=?', input.port).first()) {
+        throw new Failure('Choose a delivery port.')
+      }
+      await statement(`INSERT INTO bunker_enquiries
+        (id,request_key,company_name,work_email,port_code,grade,quantity_kg,arrival_at,end_at,created_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(request_key) DO NOTHING`,
+        id(), input.requestKey, input.company, input.email, input.port, input.grade, input.quantityKg,
+        input.arrivalAt, input.endAt, now).run()
+      return response({ receipt: input.requestKey }, 201)
+    }
+    if (action === 'bunkerTrack') {
+      await quota(env, action, ip, 90, 600000)
+      const { receipt } = z.object({ receipt: uuid }).parse(body)
+      const enquiry = await statement(`SELECT CASE
+        WHEN declined_at IS NOT NULL THEN 'declined'
+        WHEN buyer_company_id IS NOT NULL THEN 'assigned'
+        ELSE 'checking' END status
+        FROM bunker_enquiries WHERE request_key=?`, receipt).first()
+      if (!enquiry) throw new Failure('Receipt not found.', 404)
+      return response(enquiry)
     }
     if (action === 'available') {
       await quota(env, action, ip, 120, 600000)
@@ -126,7 +161,7 @@ export async function tederApi(req: Request, env: Bindings): Promise<Response> {
       return response({ ok: true }, 200, clearCookie)
     }
     const claims = await readSession(req, env)
-    const user = claims && await statement(`SELECT u.id,u.username,u.company_id,u.role,u.reviewer,u.auth_version,c.name company_name,c.status
+    const user = claims && await statement(`SELECT u.id,u.username,u.company_id,u.role,u.reviewer,u.auth_version, CASE WHEN EXISTS (SELECT 1 FROM bunker_operators o WHERE o.user_id=u.id AND o.revoked_at IS NULL) THEN 1 ELSE 0 END bunker_operator,c.name company_name,c.status
       FROM users u JOIN companies c ON c.id=u.company_id JOIN sessions s ON s.user_id=u.id
       WHERE u.id=? AND s.id=? AND u.auth_version=? AND s.expires_at>?`,
       claims.sub, claims.sid, claims.ver, Math.floor(now / 1000)).first<User>()
@@ -136,6 +171,33 @@ export async function tederApi(req: Request, env: Bindings): Promise<Response> {
     if (action === 'logout') {
       await statement('DELETE FROM sessions WHERE id=? AND user_id=?', claims.sid, user.id).run()
       return response({ ok: true }, 200, clearCookie)
+    }
+    if (action === 'bunkerEnquiries') {
+      return response({ enquiries: await all(`SELECT e.id,e.company_name,
+        CASE WHEN ?=1 THEN e.work_email END work_email,
+        p.name port,e.grade,e.quantity_kg,e.arrival_at,e.end_at,e.buyer_company_id,e.declined_at
+        FROM bunker_enquiries e JOIN bunker_ports p ON p.code=e.port_code
+        WHERE e.buyer_company_id=? OR ?=1 ORDER BY e.created_at DESC LIMIT 100`,
+        user.bunker_operator, org, user.bunker_operator) })
+    }
+    if (action === 'bunkerAssign' || action === 'bunkerDecline') {
+      if (!user.bunker_operator) throw new Failure('Teder operations access required.', 403)
+      const operatorCheck = 'EXISTS (SELECT 1 FROM bunker_operators WHERE user_id=? AND revoked_at IS NULL)'
+      if (action === 'bunkerDecline') {
+        const { enquiryId } = z.object({ enquiryId: uuid }).parse(body)
+        await changed(`UPDATE bunker_enquiries SET declined_at=?,assigned_by=?
+          WHERE id=? AND buyer_company_id IS NULL AND declined_at IS NULL AND ${operatorCheck}`,
+          now, user.id, enquiryId, user.id)
+      } else {
+        const input = z.object({ enquiryId: uuid, buyer: username }).parse(body)
+        const buyer = await statement(`SELECT company_id FROM users
+          WHERE username=? AND role='owner' AND company_id<>?`, input.buyer, org).first<{ company_id: string }>()
+        if (!buyer) throw new Failure('Enter the username of a buyer workspace owner.', 404)
+        await changed(`UPDATE bunker_enquiries SET buyer_company_id=?,assigned_by=?,assigned_at=?
+          WHERE id=? AND buyer_company_id IS NULL AND declined_at IS NULL AND ${operatorCheck}`,
+          buyer.company_id, user.id, now, input.enquiryId, user.id)
+      }
+      return response({ ok: true })
     }
     if (action === 'reviewList' || action === 'review') {
       if (!user.reviewer) throw new Failure('Reviewer access required.', 403)

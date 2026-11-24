@@ -3,6 +3,7 @@ import { useLocation } from '@tanstack/react-router'
 import { Account } from './accounts'
 import { call } from './client'
 import type { User } from './client'
+import { BunkerEnquiries, BunkerIntake } from './bunker'
 import { Workspace } from './workspace'
 
 import { Brand, Information, Landing } from './public'
@@ -18,18 +19,19 @@ export function App() {
   const authPage = accountPages.includes(path)
   return <div className="shell">
     <header className="masthead"><Brand /><nav aria-label="Main navigation">
-      {user ? <><a href="/workspace">Workspace</a><a href="/workspace/team">Company access</a>{!!user.reviewer && <a href="/workspace/review">Reviews</a>}
+      {user ? <><a href="/workspace">Workspace</a><a href="/workspace/bunkers">Marine fuel</a><a href="/workspace/team">Company access</a>{!!user.reviewer && <a href="/workspace/review">Reviews</a>}
         <button className="secondary" type="button" onClick={async () => { try { await call('logout'); location.assign('/') } catch (err) { setError(err instanceof Error ? err.message : 'Could not sign out.') } }}>Sign out</button></> :
         <><a className="nav-markets" href="/#markets">Markets</a><a href="/login">Sign in</a><a className="nav-register" href="/register">Register</a></>}
     </nav></header>
     <main id="main">
       {error && <p role="alert" className="error">{error}</p>}
       {path === '/' ? <Landing user={user ?? null} /> :
+        path === '/bunker' ? <BunkerIntake /> :
         authPage ? (user ? <section className="auth-panel"><h1>You’re signed in</h1><a className="button" href="/workspace">Open workspace</a></section> :
           <Account key={path} page={path} signedIn={() => location.assign('/workspace')} />) :
         publicPages.includes(path) ? <Information page={path} /> :
         isWorkspacePath(path) ?
-          user === undefined ? <p role="status">Loading workspace…</p> : user ? <Workspace user={user} path={path} /> :
+          user === undefined ? <p role="status">Loading workspace…</p> : user ? (path === '/workspace/bunkers' ? <BunkerEnquiries user={user} /> : <Workspace user={user} path={path} />) :
           <section className="auth-panel"><h1>Company access</h1><p>Sign in to see your company’s private requests and deals.</p><a className="button" href="/login">Sign in</a></section> :
         <section className="auth-panel"><h1>Page not found</h1><a href="/">Go to Teder</a></section>}
     </main>
