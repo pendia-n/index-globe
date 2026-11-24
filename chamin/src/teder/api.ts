@@ -108,6 +108,7 @@ export async function tederApi(req: Request, env: Bindings): Promise<Response> {
       await quota(env, action, ip, 90, 600000)
       const { receipt } = z.object({ receipt: uuid }).parse(body)
       const enquiry = await statement(`SELECT CASE
+        WHEN cancelled_at IS NOT NULL THEN 'cancelled'
         WHEN declined_at IS NOT NULL THEN 'declined'
         WHEN buyer_company_id IS NOT NULL THEN 'assigned'
         ELSE 'checking' END status
@@ -217,7 +218,7 @@ export async function tederApi(req: Request, env: Bindings): Promise<Response> {
     if (action === 'bunkerEnquiries') {
       return response({ enquiries: await all(`SELECT e.id,e.company_name,
         CASE WHEN ?=1 THEN e.work_email END work_email,
-        p.name port,e.grade,e.quantity_kg,e.arrival_at,e.end_at,e.buyer_company_id,e.declined_at,e.assigned_by
+        p.name port,e.grade,e.quantity_kg,e.arrival_at,e.end_at,e.buyer_company_id,e.declined_at,e.assigned_by,e.cancelled_at
         FROM bunker_enquiries e JOIN bunker_ports p ON p.code=e.port_code
         WHERE e.buyer_company_id=? OR ?=1 OR EXISTS (SELECT 1 FROM bunker_invitations i WHERE i.enquiry_id=e.id AND i.supplier_id=?) OR ${brokerAccess('e')} ORDER BY e.created_at DESC LIMIT 100`,
         user.bunker_operator, org, user.bunker_operator, org, org, now) })
@@ -358,7 +359,7 @@ export async function tederApi(req: Request, env: Bindings): Promise<Response> {
     if (action === 'bunkerDetail') {
       const { enquiryId } = z.object({ enquiryId: uuid }).parse(body)
       const enquiry = await statement(`SELECT e.id,e.company_name,e.grade,e.quantity_kg,e.arrival_at,e.end_at,e.vessel,e.imo,
-        e.specification,e.buyer_company_id,e.assigned_by,p.name port,
+        e.specification,e.buyer_company_id,e.assigned_by,e.revision,e.cancelled_at,e.cancellation_note,p.name port,
         CASE WHEN p.active=1 AND EXISTS(SELECT 1 FROM bunker_supplier_eligibility se JOIN companies ce ON ce.id=se.company_id
           WHERE se.port_code=p.code AND se.revoked_at IS NULL AND se.valid_until>=e.end_at AND ce.status='approved') THEN 1 ELSE 0 END active,
         ${brokerAccess('e')} is_broker
@@ -379,6 +380,8 @@ export async function tederApi(req: Request, env: Bindings): Promise<Response> {
         FROM bunker_broker_assignments a JOIN companies c ON c.id=a.broker_company_id
         WHERE a.enquiry_id=? AND a.revoked_at IS NULL`,enquiryId).first() : null
       return response({ enquiry, buyer, coordinator, broker, assignment, fulfilments, fulfilmentEvents,
+        changes: await all(`SELECT id,event,enquiry_revision,previous_terms,reason,occurred_at FROM bunker_request_changes
+          WHERE enquiry_id=? ORDER BY enquiry_revision DESC,occurred_at DESC LIMIT 50`,enquiryId),
         brokerCandidates: buyer ? await all(`SELECT c.id,c.name FROM bunker_enquiries e
           JOIN bunker_broker_eligibility b ON b.port_code=e.port_code JOIN companies c ON c.id=b.company_id
           WHERE e.id=? AND c.id<>e.buyer_company_id AND c.status='approved' AND b.valid_until>=e.end_at
@@ -397,6 +400,34 @@ export async function tederApi(req: Request, env: Bindings): Promise<Response> {
           WHERE o.enquiry_id=? AND (?=1 OR q.supplier_id=?) ORDER BY o.selected_at DESC`, enquiryId, Number(buyer || coordinator || broker), org),
       })
     }
+    if (action === 'bunkerReviseRequest' || action === 'bunkerCancelRequest') {
+      if (user.role !== 'owner' || user.status !== 'approved') throw new Failure('Approved buyer owner access required.',403)
+      const input = z.object({ enquiryId:uuid, revision:z.number().int().positive(), reason:text(500) }).parse(body)
+      const scope = `id=? AND buyer_company_id=? AND revision=? AND cancelled_at IS NULL AND declined_at IS NULL
+        AND EXISTS(SELECT 1 FROM users u JOIN companies c ON c.id=u.company_id
+          WHERE u.id=? AND c.id=bunker_enquiries.buyer_company_id AND u.role='owner' AND u.disabled_at IS NULL AND c.status='approved')
+        AND NOT EXISTS(SELECT 1 FROM bunker_orders o WHERE o.enquiry_id=bunker_enquiries.id AND o.status IN ('selected','confirmed'))`
+      const args = [input.enquiryId,org,input.revision,user.id]
+      const previous = await statement(`SELECT vessel,imo,specification,grade,quantity_kg,arrival_at,end_at FROM bunker_enquiries WHERE ${scope}`,...args).first()
+      if (!previous) throw new Failure('Refresh the request. Withdraw an active selection before changing terms.',409)
+      const revise = action === 'bunkerReviseRequest'
+      let mutation: D1PreparedStatement
+      if (revise) {
+        const next = z.object({ vessel:text(120),imo:z.string().regex(/^\d{7}$/),specification:text(1700),
+          grade:z.enum(['VLSFO','MGO']),quantityKg:z.number().int().positive().max(50000000),arrivalAt:moment,endAt:moment }).parse(body)
+        if (next.arrivalAt<=now || next.endAt<=next.arrivalAt) throw new Failure('Enter a future delivery window with an end after the start.')
+        mutation = statement(`UPDATE bunker_enquiries SET vessel=?,imo=?,specification=?,grade=?,quantity_kg=?,arrival_at=?,end_at=?,
+          revision=revision+1 WHERE ${scope}`,
+          next.vessel,next.imo,next.specification,next.grade,next.quantityKg,next.arrivalAt,next.endAt,...args)
+      } else {
+        mutation = statement(`UPDATE bunker_enquiries SET cancelled_at=?,cancellation_note=? WHERE ${scope}`,now,input.reason,...args)
+      }
+      const [result] = await db.batch([mutation, statement(`INSERT INTO bunker_request_changes
+        SELECT ?,?,?,?,?,?,?,? WHERE changes()=1`,id(),input.enquiryId,user.id,revise?'revised':'cancelled',
+        revise?input.revision+1:input.revision,JSON.stringify(previous),input.reason,now)])
+      if (!result.meta.changes) throw new Failure('The request changed before your update. Refresh and try again.',409)
+      return response({ok:true})
+    }
     if (['bunkerPrepare','bunkerInvite','bunkerQuote','bunkerSelect','bunkerRespond'].includes(action)) {
       if (user.status !== 'approved' || !['owner','trader'].includes(user.role)) {
         throw new Failure('Approved trading access required.', 403)
@@ -404,7 +435,7 @@ export async function tederApi(req: Request, env: Bindings): Promise<Response> {
       if (action === 'bunkerPrepare') {
         const i = z.object({ enquiryId: uuid, vessel: text(120), imo: z.string().regex(/^\d{7}$/), specification: text(1700) }).parse(body)
         await changed(`UPDATE bunker_enquiries AS e SET vessel=?,imo=?,specification=? WHERE id=? AND (buyer_company_id=? OR ${brokerAccess('e')})
-          AND arrival_at>? AND NOT EXISTS (SELECT 1 FROM bunker_invitations WHERE enquiry_id=e.id)`,
+          AND cancelled_at IS NULL AND revision=1 AND arrival_at>? AND NOT EXISTS (SELECT 1 FROM bunker_invitations WHERE enquiry_id=e.id)`,
           i.vessel, i.imo, i.specification, i.enquiryId, org, org, now, now)
       }
       if (action === 'bunkerInvite') {
@@ -412,26 +443,29 @@ export async function tederApi(req: Request, env: Bindings): Promise<Response> {
         await changed(`INSERT INTO bunker_invitations (enquiry_id,supplier_id,invited_at)
           SELECT e.id,s.company_id,? FROM bunker_enquiries e JOIN bunker_ports p ON p.code=e.port_code
           JOIN bunker_supplier_eligibility s ON s.port_code=e.port_code JOIN companies c ON c.id=s.company_id
-          WHERE e.id=? AND (e.buyer_company_id=? OR ${brokerAccess('e')}) AND e.vessel IS NOT NULL AND e.arrival_at>? AND p.active=1
+          WHERE e.id=? AND e.cancelled_at IS NULL AND (e.buyer_company_id=? OR ${brokerAccess('e')}) AND e.vessel IS NOT NULL AND e.arrival_at>? AND p.active=1
           AND s.company_id=? AND s.company_id<>e.buyer_company_id AND s.valid_until>=e.end_at AND c.status='approved'
           AND NOT EXISTS(SELECT 1 FROM bunker_orders o WHERE o.enquiry_id=e.id AND o.status IN ('selected','confirmed'))
           AND NOT EXISTS(SELECT 1 FROM bunker_broker_assignments a WHERE a.enquiry_id=e.id AND a.broker_company_id=s.company_id AND a.revoked_at IS NULL)
           ON CONFLICT DO NOTHING`, now, i.enquiryId, org, org, now, now, i.supplierId)
       }
       if (action === 'bunkerQuote') {
-        const i = z.object({ enquiryId: uuid, supplierId: uuid, revision: z.number().int().nonnegative(), kind: z.enum(['firm','indicative','counter']),
+        const i = z.object({ enquiryId: uuid, supplierId: uuid, revision: z.number().int().nonnegative(), enquiryRevision:z.number().int().positive(), kind: z.enum(['firm','indicative','counter']),
           price: z.number().int().positive().max(10000000), extras: z.number().int().min(0).max(1000000000), terms: text(1700), expiresAt: moment }).parse(body)
         if (i.expiresAt <= now) throw new Failure('Quote expiry must be in the future.')
         await changed(`INSERT INTO bunker_quotes
-          SELECT ?,e.id,i.supplier_id,?+1,?,?,?,?,?,?,? FROM bunker_invitations i JOIN bunker_enquiries e ON e.id=i.enquiry_id
+          SELECT ?,e.id,i.supplier_id,?+1,?,?,?,?,?,?,?,e.revision FROM bunker_invitations i JOIN bunker_enquiries e ON e.id=i.enquiry_id
           JOIN bunker_ports p ON p.code=e.port_code JOIN bunker_supplier_eligibility s ON s.port_code=e.port_code AND s.company_id=i.supplier_id
           JOIN companies c ON c.id=i.supplier_id JOIN companies b ON b.id=e.buyer_company_id
-          WHERE e.id=? AND i.supplier_id=? AND p.active=1 AND s.valid_until>=e.end_at AND c.status='approved' AND b.status='approved'
-          AND e.arrival_at>=? AND CASE WHEN ?='counter' THEN e.buyer_company_id=? AND ?>0 ELSE i.supplier_id=? END
+          WHERE e.id=? AND i.supplier_id=? AND e.revision=? AND e.cancelled_at IS NULL AND p.active=1 AND s.valid_until>=e.end_at AND c.status='approved' AND b.status='approved'
+          AND e.arrival_at>=? AND CASE WHEN ?='counter' THEN e.buyer_company_id=? AND EXISTS(
+            SELECT 1 FROM bunker_quotes prior WHERE prior.enquiry_id=e.id AND prior.supplier_id=i.supplier_id
+            AND prior.revision=? AND prior.enquiry_revision=e.revision AND prior.kind<>'counter')
+            ELSE i.supplier_id=? END
           AND NOT EXISTS(SELECT 1 FROM bunker_orders o WHERE o.enquiry_id=e.id AND o.status IN ('selected','confirmed'))
           AND COALESCE((SELECT MAX(revision) FROM bunker_quotes WHERE enquiry_id=e.id AND supplier_id=i.supplier_id),0)=?`,
           id(), i.revision, i.kind, i.price, i.extras, i.terms, i.expiresAt, user.id, now,
-          i.enquiryId, i.supplierId, i.expiresAt, i.kind, org, i.revision, org, i.revision)
+          i.enquiryId, i.supplierId, i.enquiryRevision, i.expiresAt, i.kind, org, i.revision, org, i.revision)
       }
       if (action === 'bunkerSelect') {
         if (user.role !== 'owner') throw new Failure('Buyer owner approval required.', 403)
@@ -439,7 +473,7 @@ export async function tederApi(req: Request, env: Bindings): Promise<Response> {
         await changed(`INSERT INTO bunker_orders (id,enquiry_id,quote_id,selected_by,selected_at,status)
           SELECT ?,e.id,q.id,?,?,'selected' FROM bunker_quotes q JOIN bunker_enquiries e ON e.id=q.enquiry_id
           JOIN bunker_ports p ON p.code=e.port_code JOIN bunker_supplier_eligibility s ON s.port_code=e.port_code AND s.company_id=q.supplier_id
-          JOIN companies c ON c.id=q.supplier_id WHERE q.id=? AND e.buyer_company_id=? AND c.status='approved'
+          JOIN companies c ON c.id=q.supplier_id WHERE q.id=? AND e.buyer_company_id=? AND c.status='approved' AND e.cancelled_at IS NULL AND q.enquiry_revision=e.revision
           AND p.active=1 AND s.valid_until>=e.end_at AND q.kind='firm' AND q.expires_at>? AND e.arrival_at>?
           AND q.revision=(SELECT MAX(revision) FROM bunker_quotes WHERE enquiry_id=e.id AND supplier_id=q.supplier_id)
           ON CONFLICT DO NOTHING`, id(), user.id, now, i.quoteId, org, now, now)
@@ -453,7 +487,7 @@ export async function tederApi(req: Request, env: Bindings): Promise<Response> {
             JOIN bunker_ports p ON p.code=e.port_code JOIN bunker_supplier_eligibility s ON s.port_code=e.port_code AND s.company_id=q.supplier_id
             JOIN companies b ON b.id=e.buyer_company_id JOIN companies c ON c.id=q.supplier_id WHERE q.id=bunker_orders.quote_id
             AND CASE WHEN ?='withdrawn' THEN e.buyer_company_id=? ELSE q.supplier_id=? END
-            AND (?<>'confirmed' OR (p.active=1 AND s.valid_until>=e.end_at AND q.expires_at>? AND e.arrival_at>?
+            AND (?<>'confirmed' OR (e.cancelled_at IS NULL AND q.enquiry_revision=e.revision AND p.active=1 AND s.valid_until>=e.end_at AND q.expires_at>? AND e.arrival_at>?
               AND b.status='approved' AND c.status='approved')))`,
           i.result, user.id, now, i.reference, i.orderId, i.result, org, org, i.result, now, now)
       }

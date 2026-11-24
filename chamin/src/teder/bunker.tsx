@@ -10,12 +10,13 @@ import type { Fulfilment, FulfilmentEvent } from './bunker-fulfilment'
 type Port = { code: string; name: string; time_zone: string; active: number; requested_active: number }
 type Enquiry = {
   id: string; company_name: string; work_email: string | null; port: string; grade: string
-  quantity_kg: number; arrival_at: number; end_at: number; buyer_company_id: string | null; declined_at: number | null; assigned_by: string | null
+  quantity_kg: number; arrival_at: number; end_at: number; buyer_company_id: string | null; declined_at: number | null; cancelled_at: number | null; assigned_by: string | null
 }
 const statuses = {
   checking: 'Checking coverage',
   assigned: 'Assigned to your company workspace',
   declined: 'Unable to support this request',
+  cancelled: 'Request cancelled',
 }
 export function BunkerIntake() {
   const [ports, setPorts] = useState<Port[]>([])
@@ -86,7 +87,7 @@ export function BunkerEnquiries({ user }: { user: User }) {
       <h2>{enquiry.port} · {enquiry.grade} · {enquiry.quantity_kg / 1000} t</h2>
       <p>{enquiry.company_name}{enquiry.work_email && ' · ' + enquiry.work_email}</p>
       <p>{new Date(enquiry.arrival_at).toISOString()} to {new Date(enquiry.end_at).toISOString()}</p>
-      <p>{statuses[enquiry.declined_at ? 'declined' : enquiry.buyer_company_id ? 'assigned' : 'checking']}</p>
+      <p>{statuses[enquiry.cancelled_at ? 'cancelled' : enquiry.declined_at ? 'declined' : enquiry.buyer_company_id ? 'assigned' : 'checking']}</p>
       {enquiry.buyer_company_id === user.company_id || (user.bunker_operator && enquiry.buyer_company_id && enquiry.assigned_by === user.id) || (!user.bunker_operator && !enquiry.declined_at) ?
         <p><a href={'/workspace/bunkers/' + enquiry.id}>Open fuel request</a></p> : null}
       {user.bunker_operator && !enquiry.buyer_company_id && !enquiry.declined_at && <>
@@ -103,16 +104,17 @@ export function BunkerEnquiries({ user }: { user: User }) {
   </section>
 }
 
-type Quote = { id: string; supplier_id: string; revision: number; kind: string; price_cents_per_tonne: number; extras_cents: number; terms: string; expires_at: number }
+type Quote = { id: string; supplier_id: string; revision: number; enquiry_revision: number; kind: string; price_cents_per_tonne: number; extras_cents: number; terms: string; expires_at: number }
 type Supplier = { id: string; name: string }
 type Detail = {
-  enquiry: { grade: string; port: string; active: number; quantity_kg: number; arrival_at: number; end_at: number; vessel: string | null; imo: string | null; specification: string | null }
+  enquiry: { grade: string; port: string; active: number; quantity_kg: number; arrival_at: number; end_at: number; vessel: string | null; imo: string | null; specification: string | null; revision:number; cancelled_at:number|null; cancellation_note:string|null }
   buyer: boolean
   coordinator: boolean
   broker: boolean
   assignment: { broker_company_id: string; name: string } | null
   brokerCandidates: Supplier[]
   brokerActivity: { event: string; note: string; occurred_at: number }[]
+  changes: {id:string; event:string; enquiry_revision:number; previous_terms:string|null; reason:string; occurred_at:number}[]
   eligible: Supplier[]
   invitations: { supplier_id: string; name: string }[]
   quotes: Quote[]
@@ -125,6 +127,7 @@ const displayTime = (date: number) => new Intl.DateTimeFormat('en-GB', { dateSty
 
 export function BunkerTender({ user, id }: { user: User; id: string }) {
   const [detail, setDetail] = useState<Detail | null>(null)
+  const [editing,setEditing] = useState(false)
   const [error, setError] = useState('')
   async function refresh() { setDetail(await call<Detail>('bunkerDetail', { enquiryId: id })) }
   useEffect(() => { refresh().catch(err => setError(err.message)) }, [id])
@@ -133,8 +136,9 @@ export function BunkerTender({ user, id }: { user: User; id: string }) {
     await refresh()
   }
   if (!detail) return <p role={error ? 'alert' : 'status'}>{error || 'Loading fuel request…'}</p>
-  const { enquiry, buyer, coordinator, broker, assignment, brokerCandidates, brokerActivity, invitations, quotes, orders, fulfilments, fulfilmentEvents } = detail
-  const open = !orders.some(order => ['confirmed', 'selected'].includes(order.status)) && enquiry.arrival_at > Date.now()
+  const { enquiry, buyer, coordinator, broker, assignment, brokerCandidates, brokerActivity, changes, invitations, quotes, orders, fulfilments, fulfilmentEvents } = detail
+  const uncommitted = !enquiry.cancelled_at && !orders.some(order => ['confirmed', 'selected'].includes(order.status))
+  const open = uncommitted && enquiry.arrival_at > Date.now()
   const approved = !coordinator && user.status === 'approved' && ['owner','trader'].includes(user.role)
   const remaining = detail.eligible.filter(s => !invitations.some(i => i.supplier_id === s.id))
   return <section className="workspace">
@@ -144,6 +148,37 @@ export function BunkerTender({ user, id }: { user: User; id: string }) {
     <p>{enquiry.vessel ? `${enquiry.vessel} · IMO ${enquiry.imo}` : 'Vessel details pending'}</p>
     <p>{enquiry.specification}</p>
     {!enquiry.active && <p role="status">This port is currently accepting coverage enquiries. Offers require an active route.</p>}
+    <p>Request version {enquiry.revision}</p>
+    {enquiry.cancelled_at && <p className="notice">Request cancelled · {enquiry.cancellation_note}</p>}
+    {buyer && approved && user.role === 'owner' && uncommitted && <section className="boxed">
+      <h2>Manage request</h2>
+      <button type="button" className="secondary" onClick={() => setEditing(!editing)}>{editing ? 'Close revision form' : 'Revise request terms'}</button>
+      {editing && <Form submit="Publish revised requirements" onSubmit={async data => {
+        await act('bunkerReviseRequest',{ revision:enquiry.revision, reason:field(data,'reason'), vessel:field(data,'vessel'),
+          imo:field(data,'imo'), specification:field(data,'specification'), grade:field(data,'grade'),
+          quantityKg:Math.round(Number(field(data,'quantity'))*1000), arrivalAt:Date.parse(field(data,'arrival')+'Z'),endAt:Date.parse(field(data,'end')+'Z') })
+        setEditing(false)
+      }}>
+        <p>Existing quotes stay in the record. Suppliers must submit a quote for the new requirements before you can select it.</p>
+        <Input label="Revised vessel name" name="vessel" maxLength={120} defaultValue={enquiry.vessel ?? ''} />
+        <Input label="Revised IMO number" name="imo" pattern="[0-9]{7}" defaultValue={enquiry.imo ?? ''} />
+        <label>Revised fuel grade<select name="grade" defaultValue={enquiry.grade}><option value="VLSFO">VLSFO</option><option value="MGO">Marine gas oil</option></select></label>
+        <Input label="Revised metric tonnes" name="quantity" type="number" min=".001" max="50000" step=".001" defaultValue={enquiry.quantity_kg/1000} />
+        <Input label="Revised delivery start · UTC" name="arrival" type="datetime-local" defaultValue={new Date(enquiry.arrival_at).toISOString().slice(0,16)} />
+        <Input label="Revised delivery end · UTC" name="end" type="datetime-local" defaultValue={new Date(enquiry.end_at).toISOString().slice(0,16)} />
+        <Input label="Revised specification and delivery instructions" name="specification" maxLength={1700} defaultValue={enquiry.specification ?? ''} />
+        <Input label="Reason for revision" name="reason" maxLength={500} />
+      </Form>}
+      <Form submit="Cancel fuel request" onSubmit={data => act('bunkerCancelRequest',{revision:enquiry.revision,reason:field(data,'reason')})}>
+        <Input label="Reason for cancellation" name="reason" maxLength={500} />
+        <label className="check"><input required type="checkbox" /> Close this request to further quotes and selection.</label>
+      </Form>
+    </section>}
+    {changes.length > 0 && <details><summary>Request changes</summary><ul className="records">{changes.map(change => <li key={change.id}>
+      <strong>Version {change.enquiry_revision} · {change.event}</strong> · {displayTime(change.occurred_at)}
+      <p>{change.reason}</p>
+      {change.previous_terms && <details><summary>Previous requirements</summary><pre>{JSON.stringify(JSON.parse(change.previous_terms),null,2)}</pre></details>}
+    </li>)}</ul></details>}
     {!approved && !coordinator && <p>Company trading approval is required to take action on this request.</p>}
     {(buyer || broker) && <section className="boxed">
       <h2>Broker coordination</h2>
@@ -165,7 +200,7 @@ export function BunkerTender({ user, id }: { user: User; id: string }) {
         <li key={event.occurred_at + ':' + index}><strong>{event.event}</strong> · {displayTime(event.occurred_at)}<p>{event.note}</p></li>
       )}</ul></details>}
     </section>}
-    {(buyer || broker) && approved && !invitations.length && open && <Form submit="Save vessel and terms" onSubmit={data => act('bunkerPrepare', {
+    {(buyer || broker) && approved && enquiry.revision === 1 && !invitations.length && open && <Form submit="Save vessel and terms" onSubmit={data => act('bunkerPrepare', {
       vessel: field(data,'vessel'), imo: field(data,'imo'), specification: field(data,'specification'),
     })}>
       <Input label="Vessel name" name="vessel" maxLength={120} defaultValue={enquiry.vessel ?? ''} />
@@ -183,13 +218,14 @@ export function BunkerTender({ user, id }: { user: User; id: string }) {
         <h2>{invitation.name}</h2>
         {versions.length === 0 && <p>Awaiting a quote</p>}
         {versions.map(quote => <div key={quote.id}>
-          <h3>Revision {quote.revision} · {quote.kind}</h3>
+          <h3>Quote revision {quote.revision} · {quote.kind}</h3>
+          <p>Request version {quote.enquiry_revision}{quote.enquiry_revision !== enquiry.revision && ' · superseded requirements'}</p>
           <p>{usd.format(quote.price_cents_per_tonne / 100)} per tonne · extras {usd.format(quote.extras_cents / 100)}</p>
-          <p>Estimated total {usd.format((quote.price_cents_per_tonne * enquiry.quantity_kg / 1000 + quote.extras_cents) / 100)} · Valid through {displayTime(quote.expires_at)}</p>
+          <p>{quote.enquiry_revision === enquiry.revision && <>Estimated total {usd.format((quote.price_cents_per_tonne * enquiry.quantity_kg / 1000 + quote.extras_cents) / 100)} · </>}Valid through {displayTime(quote.expires_at)}</p>
           <p>{quote.terms}</p>
         </div>)}
-        {approved && !broker && enquiry.active && open && (!buyer || latest) && <Form key={latest?.id} submit={buyer ? 'Send counteroffer' : 'Submit quote'} onSubmit={data => act('bunkerQuote', {
-          supplierId: invitation.supplier_id, revision: latest?.revision ?? 0, kind: buyer ? 'counter' : field(data,'kind'),
+        {approved && !broker && enquiry.active && open && (!buyer || (latest?.enquiry_revision === enquiry.revision && latest.kind !== 'counter')) && <Form key={latest?.id} submit={buyer ? 'Send counteroffer' : 'Submit quote'} onSubmit={data => act('bunkerQuote', {
+          supplierId: invitation.supplier_id, revision: latest?.revision ?? 0, enquiryRevision:enquiry.revision, kind: buyer ? 'counter' : field(data,'kind'),
           price: Math.round(Number(field(data,'price')) * 100), extras: Math.round(Number(field(data,'extras')) * 100),
           terms: field(data,'terms'), expiresAt: Date.parse(field(data,'expiry') + 'Z'),
         })}>
@@ -199,7 +235,7 @@ export function BunkerTender({ user, id }: { user: User; id: string }) {
           <Input label="Valid until · UTC" name="expiry" type="datetime-local" />
           <Input label="Payment terms and operational conditions" name="terms" maxLength={1700} />
         </Form>}
-        {buyer && approved && open && enquiry.active && user.role === 'owner' && latest?.kind === 'firm' && latest.expires_at > Date.now() &&
+        {buyer && approved && open && enquiry.active && user.role === 'owner' && latest?.kind === 'firm' && latest.enquiry_revision === enquiry.revision && latest.expires_at > Date.now() &&
           <Form submit="Select firm offer" onSubmit={() => act('bunkerSelect', { quoteId: latest.id })}>
             <label className="check"><input type="checkbox" required /> I have checked the delivered price, credit terms, and delivery conditions.</label>
           </Form>}
