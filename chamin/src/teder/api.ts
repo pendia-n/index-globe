@@ -147,7 +147,7 @@ export async function tederApi(req: Request, env: Bindings): Promise<Response> {
           const [result] = await db.batch([
             statement(`INSERT INTO users (id,username,password_hash,recovery_hash,company_id,role)
               SELECT ?,?,?,?,company_id,role FROM staff_invites i WHERE hash=? AND used_by IS NULL AND expires_at>?
-              AND (SELECT count(*) FROM users WHERE company_id=i.company_id)<?`,
+              AND (SELECT count(*) FROM users WHERE company_id=i.company_id AND disabled_at IS NULL)<?`,
               userId, input.username, hashed, recovery, invite, now, seatLimit),
             statement('UPDATE staff_invites SET used_by=? WHERE hash=? AND used_by IS NULL AND EXISTS (SELECT 1 FROM users WHERE id=?)', userId, invite, userId),
           ])
@@ -181,7 +181,7 @@ export async function tederApi(req: Request, env: Bindings): Promise<Response> {
       await quota(env, action + ':ip', ip, 35, 900000)
       const name = z.object({ username }).parse(body).username
       await quota(env, action + ':user', name, 10, 900000)
-      const user = await statement('SELECT id,password_hash,recovery_hash,auth_version FROM users WHERE username=?', name)
+      const user = await statement('SELECT id,password_hash,recovery_hash,auth_version FROM users WHERE username=? AND disabled_at IS NULL', name)
         .first<{ id: string; password_hash: string; recovery_hash: string; auth_version: number }>()
       if (action === 'login') {
         const value = z.object({ password: z.string().min(1).max(128) }).parse(body).password
@@ -202,7 +202,7 @@ export async function tederApi(req: Request, env: Bindings): Promise<Response> {
     const claims = await readSession(req, env)
     const user = claims && await statement(`SELECT u.id,u.username,u.company_id,u.role,u.auth_version,c.workspace_kind, CASE WHEN c.workspace_kind='operations' AND EXISTS (SELECT 1 FROM bunker_operators o WHERE o.user_id=u.id AND o.revoked_at IS NULL) THEN 1 ELSE 0 END bunker_operator,c.name company_name,c.status
       FROM users u JOIN companies c ON c.id=u.company_id JOIN sessions s ON s.user_id=u.id
-      WHERE u.id=? AND s.id=? AND u.auth_version=? AND s.expires_at>?`,
+      WHERE u.id=? AND s.id=? AND u.auth_version=? AND s.expires_at>? AND u.disabled_at IS NULL`,
       claims.sub, claims.sid, claims.ver, Math.floor(now / 1000)).first<User>()
     if (action === 'session') return response({ user: user ? { ...user, reviewer: user.bunker_operator } : null })
     if (!user || !claims) throw new Failure('Sign in to continue.', 401)
@@ -230,7 +230,7 @@ export async function tederApi(req: Request, env: Bindings): Promise<Response> {
       } else {
         const input = z.object({ enquiryId: uuid, buyer: username }).parse(body)
         const buyer = await statement(`SELECT company_id FROM users
-          WHERE username=? AND role='owner' AND company_id<>?`, input.buyer, org).first<{ company_id: string }>()
+          WHERE username=? AND role='owner' AND disabled_at IS NULL AND company_id<>?`, input.buyer, org).first<{ company_id: string }>()
         if (!buyer) throw new Failure('Enter the username of a buyer workspace owner.', 404)
         await changed(`UPDATE bunker_enquiries SET buyer_company_id=?,assigned_by=?,assigned_at=?
           WHERE id=? AND buyer_company_id IS NULL AND declined_at IS NULL AND ${operatorCheck}`,
@@ -251,7 +251,7 @@ export async function tederApi(req: Request, env: Bindings): Promise<Response> {
       if (input.validUntil <= now) throw new Failure('Enter a future licence expiry.')
       await changed(`INSERT INTO bunker_supplier_eligibility (port_code,company_id,licence_reference,valid_until,approved_by)
         SELECT p.code,c.id,?,?,? FROM users u JOIN companies c ON c.id=u.company_id
-        JOIN bunker_ports p ON p.code=? WHERE u.username=? AND u.role='owner' AND c.status='approved'
+        JOIN bunker_ports p ON p.code=? WHERE u.username=? AND u.role='owner' AND u.disabled_at IS NULL AND c.status='approved'
         AND EXISTS (SELECT 1 FROM bunker_operators WHERE user_id=? AND revoked_at IS NULL)
         ON CONFLICT(port_code,company_id) DO UPDATE SET licence_reference=excluded.licence_reference,
           valid_until=excluded.valid_until,approved_by=excluded.approved_by`,
@@ -263,7 +263,7 @@ export async function tederApi(req: Request, env: Bindings): Promise<Response> {
       const input = z.object({ port:text(5), broker:username, authority:text(300), validUntil:moment }).parse(body)
       await changed(`INSERT INTO bunker_broker_eligibility (port_code,company_id,authority_reference,valid_until,approved_by)
         SELECT p.code,c.id,?,?,? FROM users u JOIN companies c ON c.id=u.company_id
-        JOIN bunker_ports p ON p.code=? WHERE u.username=? AND u.role='owner' AND c.status='approved'
+        JOIN bunker_ports p ON p.code=? WHERE u.username=? AND u.role='owner' AND u.disabled_at IS NULL AND c.status='approved'
         AND c.workspace_kind='customer' AND EXISTS (SELECT 1 FROM bunker_operators WHERE user_id=? AND revoked_at IS NULL)
         ON CONFLICT(port_code,company_id) DO UPDATE SET authority_reference=excluded.authority_reference,
           valid_until=excluded.valid_until,approved_by=excluded.approved_by`,
@@ -454,24 +454,79 @@ export async function tederApi(req: Request, env: Bindings): Promise<Response> {
       return response({ ok:true })
     }
     if (action === 'team') return response({
-      members: await all("SELECT username,role FROM users WHERE company_id=? ORDER BY role<>'owner', username", org),
+      members: await all(`SELECT username,role,disabled_at FROM users WHERE company_id=? AND (disabled_at IS NULL OR ?=1)
+        ORDER BY disabled_at IS NOT NULL,role<>'owner',username`, org, Number(user.role==='owner')),
       invites: user.role === 'owner' ? await all('SELECT invite_id,role,expires_at FROM staff_invites WHERE company_id=? AND expires_at>? AND used_by IS NULL ORDER BY expires_at', org, now) : [],
+      transfer: await statement(`SELECT t.id,u.username,t.expires_at FROM team_transfers t JOIN users u ON u.id=t.next_owner_id
+        WHERE t.company_id=? AND t.finished_at IS NULL AND t.expires_at>? AND (t.owner_id=? OR t.next_owner_id=?)`,org,now,user.id,user.id).first(),
+      activity: user.role === 'owner' ? await all(`SELECT e.id,m.username,a.username actor,e.action,e.role,e.occurred_at
+        FROM team_access_events e JOIN users m ON m.id=e.member_id JOIN users a ON a.id=e.actor_id
+        WHERE e.company_id=? ORDER BY e.occurred_at DESC LIMIT 50`,org) : [],
       seatLimit,
     })
+    if (action === 'teamMember') {
+      if (user.role !== 'owner' || user.workspace_kind !== 'customer') throw new Failure('Company owner access required.',403)
+      const input = z.discriminatedUnion('operation', [
+        z.object({ operation:z.literal('role'), member:username, role:z.enum(['trader','operator','viewer']) }),
+        z.object({ operation:z.enum(['remove','restore']), member:username }),
+      ]).parse(body)
+      const member = await statement("SELECT id,role FROM users WHERE username=? AND company_id=? AND role<>'owner'",input.member,org)
+        .first<{id:string; role:string}>()
+      if (!member) throw new Failure('Teammate not found.',404)
+      const guard = `id=? AND role<>'owner' AND EXISTS(SELECT 1 FROM users WHERE id=? AND company_id=? AND role='owner' AND disabled_at IS NULL)`
+      const mutation = input.operation === 'role' ?
+        statement(`UPDATE users SET role=? WHERE ${guard} AND disabled_at IS NULL AND role<>?`,input.role,member.id,user.id,org,input.role) :
+        input.operation === 'remove' ?
+          statement(`UPDATE users SET disabled_at=? WHERE ${guard} AND disabled_at IS NULL`,now,member.id,user.id,org) :
+          statement(`UPDATE users SET disabled_at=NULL WHERE ${guard} AND disabled_at IS NOT NULL AND
+            (SELECT count(*) FROM users WHERE company_id=? AND disabled_at IS NULL)
+            +(SELECT count(*) FROM staff_invites WHERE company_id=? AND used_by IS NULL AND expires_at>?)<?`,
+            member.id,user.id,org,org,org,now,seatLimit)
+      const [result] = await db.batch([mutation,statement(`INSERT INTO team_access_events
+        SELECT ?,?,?,?,?,?,? WHERE changes()=1`,id(),org,member.id,user.id,input.operation,input.operation==='role'?input.role:member.role,now)])
+      if (!result.meta.changes) throw new Failure('The teammate or available seats changed. Refresh and check company access.',409)
+      return response({ok:true})
+    }
+    if (action === 'teamTransferStart' || action === 'teamTransferEnd') {
+      if (user.workspace_kind !== 'customer') throw new Failure('Company workspace access required.',403)
+      if (action === 'teamTransferStart') {
+        if (user.role !== 'owner') throw new Failure('Company owner access required.',403)
+        const {member} = z.object({member:username}).parse(body)
+        const [_, result] = await db.batch([
+          statement(`UPDATE team_transfers SET finished_at=?,outcome='cancelled'
+            WHERE company_id=? AND finished_at IS NULL AND expires_at<=?`,now,org,now),
+          statement(`INSERT INTO team_transfers (id,company_id,owner_id,next_owner_id,created_at,expires_at)
+            SELECT ?,c.company_id,o.id,c.id,?,? FROM users c JOIN users o ON o.company_id=c.company_id
+            WHERE c.username=? AND c.company_id=? AND c.id<>o.id AND c.disabled_at IS NULL AND c.role<>'owner'
+            AND o.id=? AND o.role='owner' AND o.disabled_at IS NULL ON CONFLICT DO NOTHING`,
+            id(),now,now+86400000,member,org,user.id),
+        ])
+        if (!result.meta.changes) throw new Failure('Select an active teammate or cancel the existing request first.',409)
+      } else {
+        const input = z.object({transferId:uuid, result:z.enum(['accepted','cancelled'])}).parse(body)
+        await changed(`UPDATE team_transfers SET finished_at=?,outcome=? WHERE id=? AND company_id=? AND finished_at IS NULL
+          AND CASE WHEN ?='cancelled' THEN owner_id=? OR next_owner_id=? ELSE next_owner_id=? AND expires_at>?
+            AND EXISTS(SELECT 1 FROM users u WHERE u.id=owner_id AND u.role='owner' AND u.disabled_at IS NULL)
+            AND EXISTS(SELECT 1 FROM users u WHERE u.id=next_owner_id AND u.role<>'owner' AND u.disabled_at IS NULL) END`,
+          now,input.result,input.transferId,org,input.result,user.id,user.id,user.id,now)
+      }
+      return response({ok:true})
+    }
     if (action === 'invite' || action === 'revokeInvite') {
       if (user.workspace_kind !== 'customer') throw new Failure('Operations access is provisioned separately.', 403)
       if (user.role !== 'owner') throw new Failure('Only the company owner can manage invitations.', 403)
       if (action === 'revokeInvite') {
         const { inviteId } = z.object({ inviteId: z.string().regex(/^[a-f0-9-]{32,36}$/) }).parse(body)
-        await changed('UPDATE staff_invites SET expires_at=? WHERE company_id=? AND invite_id=? AND expires_at>? AND used_by IS NULL', now, org, inviteId, now)
+        await changed("UPDATE staff_invites SET expires_at=? WHERE company_id=? AND invite_id=? AND expires_at>? AND used_by IS NULL AND EXISTS (SELECT 1 FROM users WHERE id=? AND role='owner' AND disabled_at IS NULL)", now, org, inviteId, now,user.id)
         return response({ ok: true })
       }
       const role = z.object({ role: z.enum(['trader','operator','viewer']) }).parse(body).role
       const token = Array.from(crypto.getRandomValues(new Uint8Array(24)), v => v.toString(16).padStart(2, '0')).join('')
       const result = await statement(`INSERT INTO staff_invites (hash,company_id,role,expires_at,invite_id)
-        SELECT ?,?,?,?,? WHERE (SELECT count(*) FROM users WHERE company_id=?) +
-          (SELECT count(*) FROM staff_invites WHERE company_id=? AND used_by IS NULL AND expires_at>?) < ?`,
-        await digest(secret, 'invite', token), org, role, now + 86400000, id(), org, org, now, seatLimit).run()
+        SELECT ?,?,?,?,? WHERE (SELECT count(*) FROM users WHERE company_id=? AND disabled_at IS NULL) +
+          (SELECT count(*) FROM staff_invites WHERE company_id=? AND used_by IS NULL AND expires_at>?) < ?
+        AND EXISTS(SELECT 1 FROM users WHERE id=? AND role='owner' AND disabled_at IS NULL)`,
+        await digest(secret, 'invite', token), org, role, now + 86400000, id(), org, org, now, seatLimit,user.id).run()
       if (!result.meta.changes) throw new Failure('All five company seats are occupied or reserved by invitations.', 409)
       return response({ link: new URL('/register?invite=' + token, req.url).href })
     }
@@ -533,7 +588,7 @@ export async function tederApi(req: Request, env: Bindings): Promise<Response> {
       let supplierIds = [...new Set(input.supplierIds)]
       if (!supplierIds.length && input.seller) {
         const seller = await statement(`SELECT c.id FROM users u JOIN companies c ON c.id=u.company_id
-          WHERE u.username=? AND u.role='owner' AND c.status='approved' AND c.id<>?`, input.seller, org).first<{ id: string }>()
+          WHERE u.username=? AND u.role='owner' AND u.disabled_at IS NULL AND c.status='approved' AND c.id<>?`, input.seller, org).first<{ id: string }>()
         if (seller) supplierIds = [seller.id]
       }
       if (!supplierIds.length) throw new Failure('Choose at least one approved supplier.', 400)

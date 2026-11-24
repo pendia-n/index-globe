@@ -11,7 +11,13 @@ type Deal = { id: string; offer_id: string; agreement_ref: string | null; buyer_
 type Delivery = { id: string; measured_wh: number; issuer: string; evidence_ref: string; reported_at: number; readings_wh: string | null }
 type Comparison = { request_id: string; seller_name: string; seller_status: string; offer_id: string | null; price_cents: number | null; kind: string | null; expires_at: number | null; terms: string | null; deal_id: string | null }
 type Supplier = { id: string; name: string; country: string | null }
-type TeamData = { members: { username: string; role: string }[]; invites: { invite_id: string; role: string; expires_at: number }[]; seatLimit: number }
+type TeamData = {
+  members: { username: string; role: string; disabled_at: number | null }[]
+  invites: { invite_id: string; role: string; expires_at: number }[]
+  transfer: { id:string; username:string; expires_at:number } | null
+  activity: { id:string; username:string; actor:string; action:string; role:string|null; occurred_at:number }[]
+  seatLimit: number
+}
 type Detail = { comparison: Comparison[]; request: BuyRequest; deal: Deal | null; offers: Offer[]; deliveries: Delivery[]; events: { id: string; kind: string; detail: string; occurred_at: number }[] }
 type Company = { id: string; name: string; registration: string; country: string | null; registry_region: string | null; registry_number: string | null; issuing_registry: string | null; application_id: string; contact_email: string; registry_reference: string; authority_reference: string }
 type Application = { contact_email: string; registry_reference: string; authority_reference: string; submitted_at: number; decision: string | null; decision_note: string | null }
@@ -102,12 +108,60 @@ function Team({ user }: { user: User }) {
   const [error, setError] = useState('')
   async function refresh() { setData(await call<TeamData>('team')) }
   useEffect(() => { refresh().catch(err => setError(err.message)) }, [])
-  const used = (data?.members.length ?? 0) + (data?.invites.length ?? 0)
+  const activeMembers = data?.members.filter(member => member.disabled_at === null) ?? []
+  const used = activeMembers.length + (data?.invites.length ?? 0)
+  const editable = user.role === 'owner' && user.workspace_kind === 'customer'
+  const [managing,setManaging] = useState('')
+  const [message,setMessage] = useState('')
+  async function changeMember(member:string, operation:string, role?:string) {
+    await call('teamMember',{member,operation,role})
+    setMessage('Team access updated.')
+    await refresh()
+  }
+  async function finishTransfer(result:'accepted'|'cancelled') {
+    await call('teamTransferEnd',{transferId:data?.transfer?.id,result})
+    if (result==='accepted') location.assign('/login')
+    else await refresh()
+  }
   return <section className="workspace"><span className="eyebrow">{user.company_name}</span><h1>Company access</h1>
     <dl><dt>Username</dt><dd>{user.username}</dd><dt>Workspace role</dt><dd>{user.role}</dd><dt>Trading access</dt><dd>{user.status}</dd></dl>
     {error && <p className="error" role="alert">{error}</p>}
-    {data && <section className="boxed"><h2>Team seats</h2><p>{data.members.length} of {data.seatLimit} seats occupied{user.role === 'owner' && ' · ' + data.invites.length + ' reserved by invitations'}</p>
-      <ul className="records team-records">{data.members.map(member => <li key={member.username}><strong>{member.username}</strong><span>{member.role}</span></li>)}</ul>
+    {data && <section className="boxed"><h2>Team seats</h2><p>{activeMembers.length} of {data.seatLimit} seats occupied{user.role === 'owner' && ' · ' + data.invites.length + ' reserved by invitations'}</p>
+      <ul className="records team-records">{data.members.map(member => <li key={member.username}>
+        <strong>{member.username}</strong><span>{member.disabled_at ? 'Access removed' : member.role}</span>
+        {editable && member.role !== 'owner' && <div>
+          <button type="button" className="secondary" onClick={() => setManaging(managing === member.username ? '' : member.username)}>
+            {managing === member.username ? 'Close access controls' : 'Manage access'}
+          </button>
+          {managing === member.username && (member.disabled_at ? <Form submit="Restore access" disabled={used >= data.seatLimit} onSubmit={() => changeMember(member.username,'restore')}><p>Restore this teammate’s existing role.</p></Form> : <>
+            <Form submit="Save role" onSubmit={fields => changeMember(member.username,'role',field(fields,'role'))}>
+              <label>Team role<select name="role" defaultValue={member.role}><option value="trader">Trader</option><option value="operator">Operator</option><option value="viewer">Viewer</option></select></label>
+            </Form>
+            <Form submit="Remove access" onSubmit={() => changeMember(member.username,'remove')}>
+              <label className="check"><input type="checkbox" required /> Sign this teammate out and remove access.</label>
+            </Form>
+          </>)}
+        </div>}
+      </li>)}</ul>
+      {message && <p role="status">{message}</p>}
+      {data.transfer && <div className="notice">
+        <strong>Ownership transfer to {data.transfer.username}</strong><p>Expires {time(data.transfer.expires_at)}.</p>
+        {user.username === data.transfer.username && <Form submit="Accept ownership" onSubmit={() => finishTransfer('accepted')}>
+          <label className="check"><input type="checkbox" required /> I accept responsibility for this company workspace.</label>
+        </Form>}
+        <Form submit="Cancel transfer" onSubmit={() => finishTransfer('cancelled')}><p>Keep the existing owner.</p></Form>
+      </div>}
+      {editable && !data.transfer && activeMembers.length > 1 && <Form submit="Request ownership transfer" onSubmit={async fields => {
+        await call('teamTransferStart',{member:field(fields,'member')})
+        await refresh()
+      }}>
+        <label>New company owner<select name="member" required defaultValue=""><option value="">Choose a teammate</option>
+          {activeMembers.filter(member => member.role !== 'owner').map(member => <option value={member.username} key={member.username}>{member.username}</option>)}</select></label>
+        <p>The teammate must accept. Both accounts sign out and unused invitations expire after the transfer.</p>
+      </Form>}
+      {data.activity.length > 0 && <details><summary>Team access history</summary>
+        <ul className="records">{data.activity.map(event => <li key={event.id}>{event.username} · {event.action} · {event.actor} · {time(event.occurred_at)}</li>)}</ul>
+      </details>}
       {data.invites.length > 0 && <><h3>Outstanding invitations</h3><ul className="records team-records">{data.invites.map(invite =>
         <li key={invite.invite_id}><span>{invite.role} · expires {time(invite.expires_at)}</span><Form submit="Revoke invitation" onSubmit={async () => {
           await call('revokeInvite', { inviteId: invite.invite_id })

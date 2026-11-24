@@ -59,7 +59,7 @@ export async function bunkerDocuments(
   const inserted = await db.prepare(`INSERT INTO bunker_documents (id,order_id,category,filename,sha256,bytes,content,uploaded_by,uploaded_at)
     SELECT ?,?,?,?,?,?,?,?,? WHERE (SELECT count(*) FROM bunker_documents WHERE order_id=?) < 24
       AND EXISTS (SELECT 1 FROM users u JOIN companies c ON c.id=u.company_id
-        WHERE u.id=? AND c.id=? AND c.status='approved' AND u.role IN ('owner','operator'))
+        WHERE u.id=? AND c.id=? AND c.status='approved' AND u.disabled_at IS NULL AND u.role IN ('owner','operator'))
     ON CONFLICT(order_id,category,sha256) DO NOTHING`)
     .bind(crypto.randomUUID(), orderId, input.category, filename, hash, bytes.length, bytes.buffer, user.id, now,
       orderId, user.id, user.company_id).run()

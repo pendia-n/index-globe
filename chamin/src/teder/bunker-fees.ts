@@ -44,7 +44,7 @@ export async function bunkerFees(
     const input = z.object({ reference }).parse(body)
     mutation = db.prepare(`UPDATE bunker_service_fees SET payment_ref=?,reported_at=?,reported_by=?
       WHERE order_id=? AND payer_company_id=? AND received_at IS NULL
-      AND EXISTS(SELECT 1 FROM users WHERE id=? AND company_id=? AND role IN ('owner','operator'))`)
+      AND EXISTS(SELECT 1 FROM users WHERE id=? AND company_id=? AND disabled_at IS NULL AND role IN ('owner','operator'))`)
       .bind(input.reference,now,user.id,orderId,user.company_id,user.id,user.company_id)
   } else {
     const input = z.object({ reference }).parse(body)

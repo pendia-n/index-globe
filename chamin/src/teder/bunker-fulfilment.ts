@@ -108,7 +108,7 @@ export async function applyBunkerFulfilment(
     db.prepare(`UPDATE bunker_fulfilment SET ${entries.map(([column]) => column + '=?').join(',')}, revision=revision+1
       WHERE order_id=? AND revision=? AND closed_at IS NULL AND EXISTS (
         SELECT 1 FROM users u JOIN companies c ON c.id=u.company_id WHERE u.id=? AND c.id=?
-        AND u.role IN ('owner','operator') AND c.status='approved')`)
+        AND u.disabled_at IS NULL AND u.role IN ('owner','operator') AND c.status='approved')`)
       .bind(...entries.map(([, value]) => value), orderId, revision, user.id, user.company_id),
     db.prepare(`INSERT INTO bunker_fulfilment_events (order_id, revision, actor_id, event, details, created_at)
       SELECT ?,?,?,?,?,? WHERE changes()=1`).bind(orderId, revision + 1, user.id, change.step, detail, now),
