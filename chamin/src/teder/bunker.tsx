@@ -109,6 +109,10 @@ type Detail = {
   enquiry: { grade: string; port: string; active: number; quantity_kg: number; arrival_at: number; end_at: number; vessel: string | null; imo: string | null; specification: string | null }
   buyer: boolean
   coordinator: boolean
+  broker: boolean
+  assignment: { broker_company_id: string; name: string } | null
+  brokerCandidates: Supplier[]
+  brokerActivity: { event: string; note: string; occurred_at: number }[]
   eligible: Supplier[]
   invitations: { supplier_id: string; name: string }[]
   quotes: Quote[]
@@ -129,7 +133,7 @@ export function BunkerTender({ user, id }: { user: User; id: string }) {
     await refresh()
   }
   if (!detail) return <p role={error ? 'alert' : 'status'}>{error || 'Loading fuel request…'}</p>
-  const { enquiry, buyer, coordinator, invitations, quotes, orders, fulfilments, fulfilmentEvents } = detail
+  const { enquiry, buyer, coordinator, broker, assignment, brokerCandidates, brokerActivity, invitations, quotes, orders, fulfilments, fulfilmentEvents } = detail
   const open = !orders.some(order => ['confirmed', 'selected'].includes(order.status)) && enquiry.arrival_at > Date.now()
   const approved = !coordinator && user.status === 'approved' && ['owner','trader'].includes(user.role)
   const remaining = detail.eligible.filter(s => !invitations.some(i => i.supplier_id === s.id))
@@ -141,14 +145,34 @@ export function BunkerTender({ user, id }: { user: User; id: string }) {
     <p>{enquiry.specification}</p>
     {!enquiry.active && <p role="status">This port is currently accepting coverage enquiries. Offers require an active route.</p>}
     {!approved && !coordinator && <p>Company trading approval is required to take action on this request.</p>}
-    {buyer && approved && !invitations.length && open && <Form submit="Save vessel and terms" onSubmit={data => act('bunkerPrepare', {
+    {(buyer || broker) && <section className="boxed">
+      <h2>Broker coordination</h2>
+      <p>{assignment ? 'Assigned broker · ' + assignment.name : 'No broker is assigned.'}</p>
+      {buyer && approved && user.role === 'owner' && (assignment ?
+        <Form submit="Revoke broker access" onSubmit={data => act('bunkerRevokeBroker',{note:field(data,'reason')})}>
+          <Input label="Reason for revoking access" name="reason" maxLength={600} />
+        </Form> : brokerCandidates.length > 0 && <Form submit="Appoint broker" onSubmit={data =>
+          act('bunkerAppointBroker',{brokerId:field(data,'broker'),note:field(data,'mandate')})}>
+          <label>Eligible broker<select name="broker">{brokerCandidates.map(candidate =>
+            <option key={candidate.id} value={candidate.id}>{candidate.name}</option>)}</select></label>
+          <Input label="Buyer mandate and scope" name="mandate" maxLength={600} />
+        </Form>)}
+      {assignment && user.status === 'approved' && ['owner','trader','operator'].includes(user.role) &&
+        <Form submit="Add coordination note" onSubmit={data => act('bunkerBrokerNote',{note:field(data,'note')})}>
+          <Input label="Note for buyer and broker" name="note" maxLength={1000} />
+        </Form>}
+      {brokerActivity.length > 0 && <details><summary>Broker activity</summary><ul className="records">{brokerActivity.map((event,index) =>
+        <li key={event.occurred_at + ':' + index}><strong>{event.event}</strong> · {displayTime(event.occurred_at)}<p>{event.note}</p></li>
+      )}</ul></details>}
+    </section>}
+    {(buyer || broker) && approved && !invitations.length && open && <Form submit="Save vessel and terms" onSubmit={data => act('bunkerPrepare', {
       vessel: field(data,'vessel'), imo: field(data,'imo'), specification: field(data,'specification'),
     })}>
       <Input label="Vessel name" name="vessel" maxLength={120} defaultValue={enquiry.vessel ?? ''} />
       <Input label="IMO number" name="imo" pattern="[0-9]{7}" inputMode="numeric" defaultValue={enquiry.imo ?? ''} />
       <Input label="Fuel specification, quantity tolerance and delivery instructions" name="specification" maxLength={1700} defaultValue={enquiry.specification ?? ''} />
     </Form>}
-    {buyer && approved && enquiry.vessel && enquiry.active && open && (remaining.length ? <Form submit="Invite supplier" onSubmit={data =>
+    {(buyer || broker) && approved && enquiry.vessel && enquiry.active && open && (remaining.length ? <Form submit="Invite supplier" onSubmit={data =>
       act('bunkerInvite', { supplierId: field(data,'supplier') })
     }><label>Eligible supplier<select name="supplier" required>{remaining.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}</select></label></Form> :
       <p>There are no additional eligible suppliers for this port.</p>)}
@@ -164,7 +188,7 @@ export function BunkerTender({ user, id }: { user: User; id: string }) {
           <p>Estimated total {usd.format((quote.price_cents_per_tonne * enquiry.quantity_kg / 1000 + quote.extras_cents) / 100)} · Valid through {displayTime(quote.expires_at)}</p>
           <p>{quote.terms}</p>
         </div>)}
-        {approved && enquiry.active && open && (!buyer || latest) && <Form key={latest?.id} submit={buyer ? 'Send counteroffer' : 'Submit quote'} onSubmit={data => act('bunkerQuote', {
+        {approved && !broker && enquiry.active && open && (!buyer || latest) && <Form key={latest?.id} submit={buyer ? 'Send counteroffer' : 'Submit quote'} onSubmit={data => act('bunkerQuote', {
           supplierId: invitation.supplier_id, revision: latest?.revision ?? 0, kind: buyer ? 'counter' : field(data,'kind'),
           price: Math.round(Number(field(data,'price')) * 100), extras: Math.round(Number(field(data,'extras')) * 100),
           terms: field(data,'terms'), expiresAt: Date.parse(field(data,'expiry') + 'Z'),
@@ -186,7 +210,7 @@ export function BunkerTender({ user, id }: { user: User; id: string }) {
       return <article className="boxed" key={order.id}>
       <h2>Order · {order.status}</h2>
       <p>{order.response_reference}</p>
-      {order.status === 'selected' && approved && user.role === 'owner' && <Form submit={buyer ? 'Withdraw selection' : 'Record supplier decision'} onSubmit={data =>
+      {order.status === 'selected' && approved && !broker && user.role === 'owner' && <Form submit={buyer ? 'Withdraw selection' : 'Record supplier decision'} onSubmit={data =>
         act('bunkerRespond',{ orderId: order.id, result: buyer ? 'withdrawn' : field(data,'result'), reference: field(data,'reference') })
       }>
         {!buyer && <label>Supplier decision<select name="result" required><option value="">Choose a decision</option><option value="confirmed">Confirm order</option><option value="declined">Decline order</option></select></label>}
@@ -230,6 +254,16 @@ function PortOperations() {
       <Input label="Supplier workspace owner username" name="supplier" maxLength={32} />
       <Input label="Verified supplier licence reference" name="licence" maxLength={200} />
       <Input label="Licence valid until · UTC" name="expiry" type="date" />
+    </Form>
+    <Form submit="Save broker eligibility" onSubmit={async fields => {
+      await call('bunkerApproveBroker',{ port: field(fields,'port'), broker:field(fields,'broker'), authority:field(fields,'authority'),
+        validUntil:Date.parse(field(fields,'expiry') + 'T23:59:59Z') })
+      setMessage('Broker eligibility saved.')
+    }}>
+      <label>Broker port<select name="port">{options}</select></label>
+      <Input label="Broker workspace owner username" name="broker" maxLength={32} />
+      <Input label="Verified authority reference" name="authority" maxLength={300} />
+      <Input label="Broker authority valid until · UTC" name="expiry" type="date" />
     </Form>
     {message && <p role="status">{message}</p>}
   </section>

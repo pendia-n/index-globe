@@ -1,3 +1,4 @@
+import { brokerAccess } from './bunker-brokers'
 import { hashOperatorInvitation } from './operator-identity'
 import { bunkerFees } from './bunker-fees'
 import { bunkerDocuments, maxDocumentBytes } from './bunker-documents'
@@ -215,8 +216,8 @@ export async function tederApi(req: Request, env: Bindings): Promise<Response> {
         CASE WHEN ?=1 THEN e.work_email END work_email,
         p.name port,e.grade,e.quantity_kg,e.arrival_at,e.end_at,e.buyer_company_id,e.declined_at,e.assigned_by
         FROM bunker_enquiries e JOIN bunker_ports p ON p.code=e.port_code
-        WHERE e.buyer_company_id=? OR ?=1 OR EXISTS (SELECT 1 FROM bunker_invitations i WHERE i.enquiry_id=e.id AND i.supplier_id=?) ORDER BY e.created_at DESC LIMIT 100`,
-        user.bunker_operator, org, user.bunker_operator, org) })
+        WHERE e.buyer_company_id=? OR ?=1 OR EXISTS (SELECT 1 FROM bunker_invitations i WHERE i.enquiry_id=e.id AND i.supplier_id=?) OR ${brokerAccess('e')} ORDER BY e.created_at DESC LIMIT 100`,
+        user.bunker_operator, org, user.bunker_operator, org, org, now) })
     }
     if (action === 'bunkerAssign' || action === 'bunkerDecline') {
       if (!user.bunker_operator) throw new Failure('Teder operations access required.', 403)
@@ -257,6 +258,49 @@ export async function tederApi(req: Request, env: Bindings): Promise<Response> {
         input.licence, input.validUntil, user.id, input.port, input.supplier, user.id)
       return response({ ok: true })
     }
+    if (action === 'bunkerApproveBroker') {
+      if (!user.bunker_operator) throw new Failure('Teder operations access required.', 403)
+      const input = z.object({ port:text(5), broker:username, authority:text(300), validUntil:moment }).parse(body)
+      await changed(`INSERT INTO bunker_broker_eligibility (port_code,company_id,authority_reference,valid_until,approved_by)
+        SELECT p.code,c.id,?,?,? FROM users u JOIN companies c ON c.id=u.company_id
+        JOIN bunker_ports p ON p.code=? WHERE u.username=? AND u.role='owner' AND c.status='approved'
+        AND c.workspace_kind='customer' AND EXISTS (SELECT 1 FROM bunker_operators WHERE user_id=? AND revoked_at IS NULL)
+        ON CONFLICT(port_code,company_id) DO UPDATE SET authority_reference=excluded.authority_reference,
+          valid_until=excluded.valid_until,approved_by=excluded.approved_by`,
+        input.authority,input.validUntil,user.id,input.port,input.broker,user.id)
+      return response({ ok:true })
+    }
+    if (action === 'bunkerAppointBroker' || action === 'bunkerRevokeBroker') {
+      if (user.status !== 'approved' || user.role !== 'owner') throw new Failure('Buyer owner approval required.',403)
+      const { enquiryId } = z.object({ enquiryId:uuid }).parse(body)
+      const note = z.object({ note:text(600) }).parse(body).note
+      const assign = action === 'bunkerAppointBroker'
+      const mutation = assign ? statement(`INSERT INTO bunker_broker_assignments (enquiry_id,broker_company_id,assigned_by,assigned_at,revoked_at)
+        SELECT e.id,b.company_id,?,?,NULL FROM bunker_enquiries e JOIN bunker_broker_eligibility b ON b.port_code=e.port_code
+        JOIN companies c ON c.id=b.company_id WHERE e.id=? AND e.buyer_company_id=? AND b.company_id=?
+        AND b.company_id<>e.buyer_company_id AND b.valid_until>=e.end_at AND c.status='approved'
+        AND NOT EXISTS(SELECT 1 FROM bunker_invitations i WHERE i.enquiry_id=e.id AND i.supplier_id=b.company_id)
+        ON CONFLICT(enquiry_id) DO UPDATE SET broker_company_id=excluded.broker_company_id,
+          assigned_by=excluded.assigned_by,assigned_at=excluded.assigned_at,revoked_at=NULL
+        WHERE bunker_broker_assignments.revoked_at IS NOT NULL`,
+        user.id,now,enquiryId,org,z.object({ brokerId:uuid }).parse(body).brokerId) :
+        statement(`UPDATE bunker_broker_assignments SET revoked_at=? WHERE enquiry_id=? AND revoked_at IS NULL AND
+          EXISTS (SELECT 1 FROM bunker_enquiries WHERE id=? AND buyer_company_id=?)`,now,enquiryId,enquiryId,org)
+      const [result] = await db.batch([mutation, statement(`INSERT INTO bunker_broker_activity
+        SELECT ?,enquiry_id,broker_company_id,?,?,?,? FROM bunker_broker_assignments WHERE enquiry_id=? AND changes()=1`,
+        id(),user.id,assign?'assigned':'revoked',note,now,enquiryId)])
+      if (!result.meta.changes) throw new Failure('Broker assignment is unavailable. Revoke any current assignment before appointing another broker.',409)
+      return response({ ok:true })
+    }
+    if (action === 'bunkerBrokerNote') {
+      if (user.status !== 'approved' || !['owner','trader','operator'].includes(user.role)) throw new Failure('Approved workspace access required.',403)
+      const i = z.object({ enquiryId:uuid, note:text(1000) }).parse(body)
+      await changed(`INSERT INTO bunker_broker_activity
+        SELECT ?,e.id,a.broker_company_id,?,'note',?,? FROM bunker_enquiries e JOIN bunker_broker_assignments a ON a.enquiry_id=e.id
+        WHERE e.id=? AND a.revoked_at IS NULL AND (e.buyer_company_id=? OR ${brokerAccess('e')})`,
+        id(),user.id,i.note,now,i.enquiryId,org,org,now)
+      return response({ ok:true })
+    }
     if (['bunkerFee','bunkerFeeIssue','bunkerFeeReport','bunkerFeeReceive'].includes(action)) {
       return await bunkerFees(db, user, action, body, now)
     }
@@ -278,10 +322,10 @@ export async function tederApi(req: Request, env: Bindings): Promise<Response> {
     if (action === 'bunkerDetail') {
       const { enquiryId } = z.object({ enquiryId: uuid }).parse(body)
       const enquiry = await statement(`SELECT e.id,e.company_name,e.grade,e.quantity_kg,e.arrival_at,e.end_at,e.vessel,e.imo,
-        e.specification,e.buyer_company_id,e.assigned_by,p.name port,p.active
+        e.specification,e.buyer_company_id,e.assigned_by,p.name port,p.active, ${brokerAccess('e')} is_broker
         FROM bunker_enquiries e JOIN bunker_ports p ON p.code=e.port_code WHERE e.id=? AND
-        (e.buyer_company_id=? OR (e.assigned_by=? AND ?=1) OR EXISTS (SELECT 1 FROM bunker_invitations WHERE enquiry_id=e.id AND supplier_id=?))`,
-        enquiryId, org, user.id, user.bunker_operator, org).first<{ buyer_company_id: string; assigned_by: string }>()
+        (e.buyer_company_id=? OR (e.assigned_by=? AND ?=1) OR EXISTS (SELECT 1 FROM bunker_invitations WHERE enquiry_id=e.id AND supplier_id=?) OR ${brokerAccess('e')})`,
+        org, now, enquiryId, org, user.id, user.bunker_operator, org, org, now).first<{ buyer_company_id: string; assigned_by: string; is_broker: number }>()
       if (!enquiry) throw new Failure('Request not found.', 404)
       const buyer = enquiry.buyer_company_id === org
       const coordinator = !!user.bunker_operator && enquiry.assigned_by === user.id
@@ -291,15 +335,27 @@ export async function tederApi(req: Request, env: Bindings): Promise<Response> {
       const fulfilmentEvents = await all(`SELECT x.order_id,x.revision,x.event,x.details,x.created_at
         FROM bunker_fulfilment_events x JOIN bunker_orders o ON o.id=x.order_id JOIN bunker_quotes q ON q.id=o.quote_id
         WHERE o.enquiry_id=? AND (?=1 OR q.supplier_id=?) ORDER BY x.revision`, enquiryId, Number(buyer || coordinator), org)
-      return response({ enquiry, buyer, coordinator, fulfilments, fulfilmentEvents,
-        eligible: buyer ? await all(`SELECT c.id,c.name FROM bunker_enquiries e JOIN bunker_supplier_eligibility s ON s.port_code=e.port_code
-          JOIN companies c ON c.id=s.company_id WHERE e.id=? AND c.id<>? AND c.status='approved' AND s.valid_until>=?
-          ORDER BY c.name LIMIT 100`, enquiryId, org, now) : [],
+      const broker = !!enquiry.is_broker
+      const assignment = buyer || broker ? await statement(`SELECT a.broker_company_id,c.name
+        FROM bunker_broker_assignments a JOIN companies c ON c.id=a.broker_company_id
+        WHERE a.enquiry_id=? AND a.revoked_at IS NULL`,enquiryId).first() : null
+      return response({ enquiry, buyer, coordinator, broker, assignment, fulfilments, fulfilmentEvents,
+        brokerCandidates: buyer ? await all(`SELECT c.id,c.name FROM bunker_enquiries e
+          JOIN bunker_broker_eligibility b ON b.port_code=e.port_code JOIN companies c ON c.id=b.company_id
+          WHERE e.id=? AND c.id<>e.buyer_company_id AND c.status='approved' AND b.valid_until>=e.end_at
+          AND NOT EXISTS (SELECT 1 FROM bunker_invitations i WHERE i.enquiry_id=e.id AND i.supplier_id=c.id)
+          ORDER BY c.name LIMIT 100`,enquiryId) : [],
+        brokerActivity: buyer || broker ? await all(`SELECT event,note,occurred_at FROM bunker_broker_activity
+          WHERE enquiry_id=? AND (?=1 OR broker_company_id=?) ORDER BY occurred_at DESC LIMIT 50`,enquiryId,Number(buyer),org) : [],
+        eligible: buyer || broker ? await all(`SELECT c.id,c.name FROM bunker_enquiries e JOIN bunker_supplier_eligibility s ON s.port_code=e.port_code
+          JOIN companies c ON c.id=s.company_id WHERE e.id=? AND c.id<>e.buyer_company_id AND c.status='approved' AND s.valid_until>=e.end_at
+          AND NOT EXISTS(SELECT 1 FROM bunker_broker_assignments a WHERE a.enquiry_id=e.id AND a.broker_company_id=c.id AND a.revoked_at IS NULL)
+          ORDER BY c.name LIMIT 100`, enquiryId) : [],
         invitations: await all(`SELECT i.supplier_id,c.name FROM bunker_invitations i JOIN companies c ON c.id=i.supplier_id
-          WHERE i.enquiry_id=? AND (?=1 OR i.supplier_id=?) ORDER BY c.name`, enquiryId, Number(buyer || coordinator), org),
-        quotes: await all(`SELECT * FROM bunker_quotes WHERE enquiry_id=? AND (?=1 OR supplier_id=?) ORDER BY revision DESC`, enquiryId, Number(buyer || coordinator), org),
+          WHERE i.enquiry_id=? AND (?=1 OR i.supplier_id=?) ORDER BY c.name`, enquiryId, Number(buyer || coordinator || broker), org),
+        quotes: await all(`SELECT * FROM bunker_quotes WHERE enquiry_id=? AND (?=1 OR supplier_id=?) ORDER BY revision DESC`, enquiryId, Number(buyer || coordinator || broker), org),
         orders: await all(`SELECT o.* FROM bunker_orders o JOIN bunker_quotes q ON q.id=o.quote_id
-          WHERE o.enquiry_id=? AND (?=1 OR q.supplier_id=?) ORDER BY o.selected_at DESC`, enquiryId, Number(buyer || coordinator), org),
+          WHERE o.enquiry_id=? AND (?=1 OR q.supplier_id=?) ORDER BY o.selected_at DESC`, enquiryId, Number(buyer || coordinator || broker), org),
       })
     }
     if (['bunkerPrepare','bunkerInvite','bunkerQuote','bunkerSelect','bunkerRespond'].includes(action)) {
@@ -308,19 +364,20 @@ export async function tederApi(req: Request, env: Bindings): Promise<Response> {
       }
       if (action === 'bunkerPrepare') {
         const i = z.object({ enquiryId: uuid, vessel: text(120), imo: z.string().regex(/^\d{7}$/), specification: text(1700) }).parse(body)
-        await changed(`UPDATE bunker_enquiries SET vessel=?,imo=?,specification=? WHERE id=? AND buyer_company_id=?
-          AND arrival_at>? AND NOT EXISTS (SELECT 1 FROM bunker_invitations WHERE enquiry_id=bunker_enquiries.id)`,
-          i.vessel, i.imo, i.specification, i.enquiryId, org, now)
+        await changed(`UPDATE bunker_enquiries AS e SET vessel=?,imo=?,specification=? WHERE id=? AND (buyer_company_id=? OR ${brokerAccess('e')})
+          AND arrival_at>? AND NOT EXISTS (SELECT 1 FROM bunker_invitations WHERE enquiry_id=e.id)`,
+          i.vessel, i.imo, i.specification, i.enquiryId, org, org, now, now)
       }
       if (action === 'bunkerInvite') {
         const i = z.object({ enquiryId: uuid, supplierId: uuid }).parse(body)
         await changed(`INSERT INTO bunker_invitations (enquiry_id,supplier_id,invited_at)
           SELECT e.id,s.company_id,? FROM bunker_enquiries e JOIN bunker_ports p ON p.code=e.port_code
           JOIN bunker_supplier_eligibility s ON s.port_code=e.port_code JOIN companies c ON c.id=s.company_id
-          WHERE e.id=? AND e.buyer_company_id=? AND e.vessel IS NOT NULL AND e.arrival_at>? AND p.active=1
-          AND s.company_id=? AND s.company_id<>? AND s.valid_until>=e.end_at AND c.status='approved'
+          WHERE e.id=? AND (e.buyer_company_id=? OR ${brokerAccess('e')}) AND e.vessel IS NOT NULL AND e.arrival_at>? AND p.active=1
+          AND s.company_id=? AND s.company_id<>e.buyer_company_id AND s.valid_until>=e.end_at AND c.status='approved'
           AND NOT EXISTS(SELECT 1 FROM bunker_orders o WHERE o.enquiry_id=e.id AND o.status IN ('selected','confirmed'))
-          ON CONFLICT DO NOTHING`, now, i.enquiryId, org, now, i.supplierId, org)
+          AND NOT EXISTS(SELECT 1 FROM bunker_broker_assignments a WHERE a.enquiry_id=e.id AND a.broker_company_id=s.company_id AND a.revoked_at IS NULL)
+          ON CONFLICT DO NOTHING`, now, i.enquiryId, org, org, now, now, i.supplierId)
       }
       if (action === 'bunkerQuote') {
         const i = z.object({ enquiryId: uuid, supplierId: uuid, revision: z.number().int().nonnegative(), kind: z.enum(['firm','indicative','counter']),
