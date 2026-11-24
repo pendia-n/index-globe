@@ -24,7 +24,7 @@ if (mode === 'invite') {
     ('${hash}','${username}',${now},${now + 3600000},NULL) RETURNING username`)
   if (inserted.results.length !== 1) throw new Error('Invitation was not created.')
   console.log('Private, single-use operator activation path. Share it directly with the verified operator. It expires in one hour.')
-  console.log('/register?operator=' + token)
+  console.log('/register#operator=' + token)
 } else {
   const [revoked] = execute(`UPDATE bunker_operators SET revoked_at=${now} WHERE revoked_at IS NULL AND user_id IN
     (SELECT u.id FROM users u JOIN companies c ON c.id=u.company_id WHERE u.username='${username}' AND c.workspace_kind='operations')

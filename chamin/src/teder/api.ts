@@ -78,7 +78,10 @@ export async function tederApi(req: Request, env: Bindings): Promise<Response> {
       if (!r.meta.changes) throw new Failure('This record changed or the action is unavailable. Refresh and try again.', 409)
     }
     if (action === 'bunkerPorts') {
-      return response({ ports: await all('SELECT code,name,time_zone,active FROM bunker_ports ORDER BY name') })
+      return response({ ports: await all(`SELECT p.code,p.name,p.time_zone,p.active requested_active,
+        CASE WHEN p.active=1 AND EXISTS(SELECT 1 FROM bunker_supplier_eligibility s JOIN companies c ON c.id=s.company_id
+          WHERE s.port_code=p.code AND s.revoked_at IS NULL AND s.valid_until>? AND c.status='approved') THEN 1 ELSE 0 END active
+        FROM bunker_ports p ORDER BY name`,now) })
     }
     if (action === 'bunkerSubmit') {
       await quota(env, action, ip, 12, 3600000)
@@ -238,37 +241,70 @@ export async function tederApi(req: Request, env: Bindings): Promise<Response> {
       }
       return response({ ok: true })
     }
+    if (action === 'bunkerCoverageAdmin') {
+      if (!user.bunker_operator) throw new Failure('Teder operations access required.', 403)
+      return response({
+        eligibility: await all(`SELECT x.*,c.name,c.status FROM (
+          SELECT 'supplier' kind,port_code,company_id,licence_reference reference,valid_until,revoked_at FROM bunker_supplier_eligibility
+          UNION ALL SELECT 'broker',port_code,company_id,authority_reference,valid_until,revoked_at FROM bunker_broker_eligibility
+        ) x JOIN companies c ON c.id=x.company_id ORDER BY x.port_code,x.kind,c.name LIMIT 500`),
+        activity: await all(`SELECT e.id,e.port_code,c.name,e.action,e.note,e.occurred_at
+          FROM bunker_eligibility_events e LEFT JOIN companies c ON c.id=e.company_id ORDER BY occurred_at DESC LIMIT 60`),
+      })
+    }
     if (action === 'bunkerCoverage') {
       if (!user.bunker_operator) throw new Failure('Teder operations access required.', 403)
-      const input = z.object({ port: text(5), enabled: z.boolean() }).parse(body)
-      await changed(`UPDATE bunker_ports SET active=? WHERE code=? AND EXISTS
-        (SELECT 1 FROM bunker_operators WHERE user_id=? AND revoked_at IS NULL)`, Number(input.enabled), input.port, user.id)
+      const input = z.object({ port: text(5), enabled: z.boolean(), note: text(500).optional() }).parse(body)
+      const [result] = await db.batch([
+        statement(`UPDATE bunker_ports SET active=? WHERE code=? AND EXISTS
+          (SELECT 1 FROM bunker_operators WHERE user_id=? AND revoked_at IS NULL)
+          AND (?=0 OR EXISTS(SELECT 1 FROM bunker_supplier_eligibility s JOIN companies c ON c.id=s.company_id
+            WHERE s.port_code=bunker_ports.code AND s.valid_until>? AND s.revoked_at IS NULL AND c.status='approved'))`,
+          Number(input.enabled), input.port, user.id, Number(input.enabled), now),
+        statement(`INSERT INTO bunker_eligibility_events SELECT ?,?,NULL,?,?,?,? WHERE changes()=1`,
+          id(),input.port,user.id,input.enabled?'port-enabled':'port-paused',input.note ?? 'Adjusted quoting availability',now),
+      ])
+      if (!result.meta.changes) throw new Failure('A port needs a currently eligible supplier before it can open for quotes.',409)
       return response({ ok: true })
     }
-    if (action === 'bunkerApproveSupplier') {
+    if (['bunkerApproveSupplier','bunkerApproveBroker','bunkerRevokeEligibility'].includes(action)) {
       if (!user.bunker_operator) throw new Failure('Teder operations access required.', 403)
-      const input = z.object({ port: text(5), supplier: username, licence: text(200), validUntil: moment }).parse(body)
-      if (input.validUntil <= now) throw new Failure('Enter a future licence expiry.')
-      await changed(`INSERT INTO bunker_supplier_eligibility (port_code,company_id,licence_reference,valid_until,approved_by)
-        SELECT p.code,c.id,?,?,? FROM users u JOIN companies c ON c.id=u.company_id
-        JOIN bunker_ports p ON p.code=? WHERE u.username=? AND u.role='owner' AND u.disabled_at IS NULL AND c.status='approved'
-        AND EXISTS (SELECT 1 FROM bunker_operators WHERE user_id=? AND revoked_at IS NULL)
-        ON CONFLICT(port_code,company_id) DO UPDATE SET licence_reference=excluded.licence_reference,
-          valid_until=excluded.valid_until,approved_by=excluded.approved_by`,
-        input.licence, input.validUntil, user.id, input.port, input.supplier, user.id)
-      return response({ ok: true })
-    }
-    if (action === 'bunkerApproveBroker') {
-      if (!user.bunker_operator) throw new Failure('Teder operations access required.', 403)
-      const input = z.object({ port:text(5), broker:username, authority:text(300), validUntil:moment }).parse(body)
-      await changed(`INSERT INTO bunker_broker_eligibility (port_code,company_id,authority_reference,valid_until,approved_by)
-        SELECT p.code,c.id,?,?,? FROM users u JOIN companies c ON c.id=u.company_id
-        JOIN bunker_ports p ON p.code=? WHERE u.username=? AND u.role='owner' AND u.disabled_at IS NULL AND c.status='approved'
-        AND c.workspace_kind='customer' AND EXISTS (SELECT 1 FROM bunker_operators WHERE user_id=? AND revoked_at IS NULL)
-        ON CONFLICT(port_code,company_id) DO UPDATE SET authority_reference=excluded.authority_reference,
-          valid_until=excluded.valid_until,approved_by=excluded.approved_by`,
-        input.authority,input.validUntil,user.id,input.port,input.broker,user.id)
-      return response({ ok:true })
+      const revoke = action === 'bunkerRevokeEligibility'
+      const kind = revoke ? z.object({kind:z.enum(['supplier','broker'])}).parse(body).kind :
+        action === 'bunkerApproveSupplier' ? 'supplier' : 'broker'
+      const table = kind === 'supplier' ? 'bunker_supplier_eligibility' : 'bunker_broker_eligibility'
+      if (revoke) {
+        const i = z.object({ port:text(5), company:uuid, note:text(500) }).parse(body)
+        const [result] = await db.batch([
+          statement(`UPDATE ${table} SET revoked_at=?,valid_until=MIN(valid_until,?) WHERE port_code=? AND company_id=? AND revoked_at IS NULL
+            AND EXISTS (SELECT 1 FROM bunker_operators WHERE user_id=? AND revoked_at IS NULL)`,now,now,i.port,i.company,user.id),
+          statement(`INSERT INTO bunker_eligibility_events SELECT ?,?,?,?,?,?,? WHERE changes()=1`,id(),i.port,i.company,user.id,kind+'-revoked',i.note,now),
+        ])
+        if (!result.meta.changes) throw new Failure('Eligibility was already removed or no longer exists.',409)
+      } else {
+        const i = z.object({ port:text(5), supplier:username.optional(), broker:username.optional(),
+          licence:text(200).optional(), authority:text(300).optional(), validUntil:moment }).parse(body)
+        const name = kind==='supplier'?i.supplier:i.broker
+        const reference = kind==='supplier'?i.licence:i.authority
+        if (!name || !reference || i.validUntil <= now) throw new Failure('Enter a verified authority reference and a future expiry.')
+        const column = kind==='supplier'?'licence_reference':'authority_reference'
+        const company = await statement(`SELECT c.id FROM users u JOIN companies c ON c.id=u.company_id
+          WHERE u.username=? AND u.role='owner' AND u.disabled_at IS NULL AND c.status='approved' AND c.workspace_kind='customer'`,
+          name).first<{id:string}>()
+        if (!company) throw new Failure('Choose an approved customer workspace owner.',404)
+        const [result] = await db.batch([
+          statement(`INSERT INTO ${table} (port_code,company_id,${column},valid_until,approved_by)
+            SELECT p.code,c.id,?,?,? FROM bunker_ports p JOIN companies c ON c.id=? AND c.status='approved'
+            WHERE p.code=? AND EXISTS (SELECT 1 FROM bunker_operators WHERE user_id=? AND revoked_at IS NULL)
+            ON CONFLICT(port_code,company_id) DO UPDATE SET ${column}=excluded.${column},
+              valid_until=excluded.valid_until,approved_by=excluded.approved_by,revoked_at=NULL`,
+            reference,i.validUntil,user.id,company.id,i.port,user.id),
+          statement(`INSERT INTO bunker_eligibility_events SELECT ?,?,?,?,?,?,? WHERE changes()=1`,
+            id(),i.port,company.id,user.id,kind+'-approved',reference,now),
+        ])
+        if (!result.meta.changes) throw new Failure('Eligibility could not be recorded for this port.',409)
+      }
+      return response({ok:true})
     }
     if (action === 'bunkerAppointBroker' || action === 'bunkerRevokeBroker') {
       if (user.status !== 'approved' || user.role !== 'owner') throw new Failure('Buyer owner approval required.',403)
@@ -322,7 +358,10 @@ export async function tederApi(req: Request, env: Bindings): Promise<Response> {
     if (action === 'bunkerDetail') {
       const { enquiryId } = z.object({ enquiryId: uuid }).parse(body)
       const enquiry = await statement(`SELECT e.id,e.company_name,e.grade,e.quantity_kg,e.arrival_at,e.end_at,e.vessel,e.imo,
-        e.specification,e.buyer_company_id,e.assigned_by,p.name port,p.active, ${brokerAccess('e')} is_broker
+        e.specification,e.buyer_company_id,e.assigned_by,p.name port,
+        CASE WHEN p.active=1 AND EXISTS(SELECT 1 FROM bunker_supplier_eligibility se JOIN companies ce ON ce.id=se.company_id
+          WHERE se.port_code=p.code AND se.revoked_at IS NULL AND se.valid_until>=e.end_at AND ce.status='approved') THEN 1 ELSE 0 END active,
+        ${brokerAccess('e')} is_broker
         FROM bunker_enquiries e JOIN bunker_ports p ON p.code=e.port_code WHERE e.id=? AND
         (e.buyer_company_id=? OR (e.assigned_by=? AND ?=1) OR EXISTS (SELECT 1 FROM bunker_invitations WHERE enquiry_id=e.id AND supplier_id=?) OR ${brokerAccess('e')})`,
         org, now, enquiryId, org, user.id, user.bunker_operator, org, org, now).first<{ buyer_company_id: string; assigned_by: string; is_broker: number }>()

@@ -4,5 +4,5 @@ export const brokerAccess = (enquiry: string) => `EXISTS (
     ON be.port_code=${enquiry}.port_code AND be.company_id=ba.broker_company_id
   JOIN companies bc ON bc.id=ba.broker_company_id
   WHERE ba.enquiry_id=${enquiry}.id AND ba.broker_company_id=? AND ba.revoked_at IS NULL
-    AND be.valid_until>? AND bc.status='approved'
+    AND be.revoked_at IS NULL AND be.valid_until>? AND bc.status='approved'
 )`

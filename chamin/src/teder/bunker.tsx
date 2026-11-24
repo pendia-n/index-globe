@@ -7,7 +7,7 @@ import { BunkerDocumentPanel } from './bunker-document-panel'
 import { BunkerSettlement } from './bunker-settlement'
 import type { Fulfilment, FulfilmentEvent } from './bunker-fulfilment'
 
-type Port = { code: string; name: string; time_zone: string; active: number }
+type Port = { code: string; name: string; time_zone: string; active: number; requested_active: number }
 type Enquiry = {
   id: string; company_name: string; work_email: string | null; port: string; grade: string
   quantity_kg: number; arrival_at: number; end_at: number; buyer_company_id: string | null; declined_at: number | null; assigned_by: string | null
@@ -231,24 +231,35 @@ export function BunkerTender({ user, id }: { user: User; id: string }) {
 function PortOperations() {
   const [ports, setPorts] = useState<Port[]>([])
   const [message, setMessage] = useState('')
-  async function refresh() { setPorts((await call<{ ports: Port[] }>('bunkerPorts')).ports) }
-  useEffect(() => { refresh().catch(err => setMessage(err.message)) }, [])
-  if (!ports.length) return message ? <p role="alert">{message}</p> : null
-  const options = ports.map(p => <option key={p.code} value={p.code}>{p.name} · {p.active ? 'active' : 'coverage enquiries'}</option>)
+  const [error, setError] = useState('')
+  const [roster, setRoster] = useState<{
+    eligibility: {kind:string; port_code:string; company_id:string; name:string; reference:string; valid_until:number; revoked_at:number|null; status:string}[]
+    activity: {id:string; port_code:string; action:string; note:string; name:string|null; occurred_at:number}[]
+  } | null>(null)
+  async function refresh() {
+    const [portResult, eligibility] = await Promise.all([call<{ports:Port[]}>('bunkerPorts'), call<NonNullable<typeof roster>>('bunkerCoverageAdmin')])
+    setPorts(portResult.ports)
+    setRoster(eligibility)
+  }
+  useEffect(() => { refresh().catch(err => setError(err.message)) }, [])
+  if (!ports.length) return error ? <p role="alert">{error}</p> : <p role="status">Loading port coverage…</p>
+  const options = ports.map(p => <option key={p.code} value={p.code}>{p.name} · {p.active ? 'quoting open' : p.requested_active ? 'no eligible supplier' : 'coverage enquiries'}</option>)
   return <section className="boxed">
     <h2>Port coverage</h2>
     <Form submit="Save port status" onSubmit={async fields => {
-      await call('bunkerCoverage', { port: field(fields,'port'), enabled: field(fields,'state') === 'active' })
+      await call('bunkerCoverage', { port: field(fields,'port'), enabled: field(fields,'state') === 'active', note: field(fields,'reason') || undefined })
       setMessage('Port status saved.')
       await refresh()
     }}>
       <label>Port<select name="port">{options}</select></label>
       <label>Availability<select name="state"><option value="enquiry">Coverage enquiries only</option><option value="active">Enable requests for quotes</option></select></label>
+      <Input label="Coverage decision note" name="reason" maxLength={500} required={false} />
     </Form>
     <Form submit="Save supplier eligibility" onSubmit={async fields => {
       await call('bunkerApproveSupplier', { port: field(fields,'port'), supplier: field(fields,'supplier'),
         licence: field(fields,'licence'), validUntil: Date.parse(field(fields,'expiry') + 'T23:59:59Z') })
       setMessage('Supplier eligibility saved.')
+      await refresh()
     }}>
       <label>Supplier port<select name="port">{options}</select></label>
       <Input label="Supplier workspace owner username" name="supplier" maxLength={32} />
@@ -259,6 +270,7 @@ function PortOperations() {
       await call('bunkerApproveBroker',{ port: field(fields,'port'), broker:field(fields,'broker'), authority:field(fields,'authority'),
         validUntil:Date.parse(field(fields,'expiry') + 'T23:59:59Z') })
       setMessage('Broker eligibility saved.')
+      await refresh()
     }}>
       <label>Broker port<select name="port">{options}</select></label>
       <Input label="Broker workspace owner username" name="broker" maxLength={32} />
@@ -266,5 +278,24 @@ function PortOperations() {
       <Input label="Broker authority valid until · UTC" name="expiry" type="date" />
     </Form>
     {message && <p role="status">{message}</p>}
+    {roster && <section>
+      <h3>Supplier and broker eligibility</h3>
+      {roster.eligibility.length === 0 && <p>No supplier or broker has been verified yet.</p>}
+      {roster.eligibility.map(entry => <div className="notice" key={entry.kind + ':' + entry.port_code + ':' + entry.company_id}>
+        <b>{entry.name} · {entry.kind} · {ports.find(port => port.code === entry.port_code)?.name ?? entry.port_code}</b>
+        <p>{entry.revoked_at ? 'Revoked' : entry.valid_until <= Date.now() || entry.status !== 'approved' ? 'Ineligible' : 'Eligible until ' + displayTime(entry.valid_until)} · {entry.reference}</p>
+        {!entry.revoked_at && <Form submit="Revoke eligibility" onSubmit={async fields => {
+          await call('bunkerRevokeEligibility',{kind:entry.kind,port:entry.port_code,company:entry.company_id,note:field(fields,'note')})
+          setMessage('Eligibility revoked.')
+          await refresh()
+        }}><Input label="Reason eligibility is being revoked" name="note" maxLength={500} /></Form>}
+      </div>)}
+      {roster.activity.length > 0 && <details><summary>Coverage and eligibility history</summary>
+        <ul className="records">{roster.activity.map(event => <li key={event.id}>
+          <b>{event.port_code} · {event.action.replace(/-/g,' ')}{event.name && ' · ' + event.name}</b>
+          <p>{event.note} · {displayTime(event.occurred_at)}</p>
+        </li>)}</ul>
+      </details>}
+    </section>}
   </section>
 }

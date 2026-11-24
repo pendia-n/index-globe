@@ -42,7 +42,7 @@ export function Account({ page, signedIn }: { page: string; signedIn: () => void
   const recovery = page === '/recovery'
   useEffect(() => {
     const params = new URLSearchParams(window.location.search)
-    const operator = params.get('operator') || ''
+    const operator = new URLSearchParams(window.location.hash.slice(1)).get('operator') || params.get('operator') || ''
     const token = params.get('invite') || ''
     setOperatorInvite(operator)
     setInvite(token)
