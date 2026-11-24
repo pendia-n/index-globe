@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { call, field } from './client'
 import { Copy, Form, Input } from './forms'
-import { findRegistry, registries, registryNumber } from './registries'
+import { findRegistry, jurisdictions, registryNumber } from './registries'
 
 function newCode() {
   return Array.from(crypto.getRandomValues(new Uint8Array(20)), value => value.toString(16).padStart(2, '0')).join('').match(/.{5}/g)!.join('-')
@@ -31,18 +31,22 @@ export function Account({ page, signedIn }: { page: string; signedIn: () => void
   const [availability, setAvailability] = useState('')
   const [identified, setIdentified] = useState(false)
   const [invite, setInvite] = useState('')
+  const [operatorInvite, setOperatorInvite] = useState('')
   const [message, setMessage] = useState('')
   const [country, setCountry] = useState('')
   const [registration, setRegistration] = useState('')
   const registry = findRegistry(country)
-  const registryValid = registry?.pattern.test(registryNumber(country, registration))
+  const registryValid = registry ? registry.pattern.test(registryNumber(country, registration)) : !!(country && registration.trim())
 
   const register = page === '/register'
   const recovery = page === '/recovery'
   useEffect(() => {
-    const token = new URLSearchParams(window.location.search).get('invite') || ''
+    const params = new URLSearchParams(window.location.search)
+    const operator = params.get('operator') || ''
+    const token = params.get('invite') || ''
+    setOperatorInvite(operator)
     setInvite(token)
-    if (token) window.history.replaceState(null, '', '/register')
+    if (token || operator) window.history.replaceState(null, '', '/register')
   }, [])
   useEffect(() => {
     if (!register || !/^[a-z0-9][a-z0-9_.-]{2,31}$/i.test(name)) return
@@ -56,10 +60,10 @@ export function Account({ page, signedIn }: { page: string; signedIn: () => void
   }, [name, register])
   return <section className="auth-panel">
     <a className="eyebrow" href="/">Teder / Company access</a>
-    <h1>{register ? (invite ? 'Join your company' : 'Register your company') : recovery ? 'Recover your account' : 'Sign in'}</h1>
-    {register && <p>{invite ? 'Create your own username and recovery code to join the workspace.' : 'Register one workspace for your legal entity. Already have a Teder workspace? Ask your company owner for your own invitation link.'}</p>}
+    <h1>{register ? (operatorInvite ? 'Activate Teder operations access' : invite ? 'Join your company' : 'Register your company') : recovery ? 'Recover your account' : 'Sign in'}</h1>
+    {register && <p>{operatorInvite ? 'Use the dedicated username specified by the person who sent this invitation.' : invite ? 'Create your own username and recovery code to join the workspace.' : 'Register one workspace for your legal entity. Already have a Teder workspace? Ask your company owner for your own invitation link.'}</p>}
     {message ? <><p role="status">{message}</p><a className="button" href="/login">Go to sign in</a></> : <Form key={String(identified)} submit={recovery ? (identified ? 'Reset password' : 'Continue') : register ? 'Register' : 'Sign in'}
-      disabled={(register && availability === 'Username is taken') || ((register || (recovery && identified)) && !code) || (register && !invite && !registryValid)}
+      disabled={(register && availability === 'Username is taken') || ((register || (recovery && identified)) && !code) || (register && !invite && !operatorInvite && !registryValid)}
       onSubmit={async data => {
         if (recovery && !identified) { setIdentified(true); return }
         if (register || recovery) {
@@ -67,7 +71,7 @@ export function Account({ page, signedIn }: { page: string; signedIn: () => void
         }
         await call(recovery ? 'recover' : register ? 'register' : 'login', {
           username: name, saved: data.has('saved'), password: field(data, 'password'), code, recoveryConfirmation: field(data, 'recoveryConfirmation'),
-          company: field(data, 'company'), country, registryRegion: field(data, 'registryRegion'), registration, invite, oldCode: field(data, 'oldCode'),
+          company: field(data, 'company'), country, registryRegion: field(data, 'registryRegion'), registration, invite, operatorInvite: operatorInvite || undefined, issuingRegistry: field(data, 'issuingRegistry'), oldCode: field(data, 'oldCode'),
         })
         if (recovery) {
           setCode('')
@@ -77,16 +81,18 @@ export function Account({ page, signedIn }: { page: string; signedIn: () => void
       {recovery && identified ? <p className="username"><strong>{name}</strong> <button type="button" className="secondary" onClick={() => { setIdentified(false); setCode('') }}>Change username</button></p> :
         <Input label="Username" name="username" placeholder="3–32 letters, numbers, dots or dashes" autoComplete="username" minLength={3} maxLength={32} pattern="[A-Za-z0-9][A-Za-z0-9_.\-]{2,31}" value={name} onChange={e => { setName(e.target.value); setAvailability('') }} />}
       {register && availability && <small role="status">{availability}</small>}
-      {register && !invite && <>
+      {register && !invite && !operatorInvite && <>
         <Input label="Legal company name" name="company" autoComplete="organization" maxLength={120} />
         <label>Country or territory of registration
           <select name="country" autoComplete="country" required value={country} onChange={event => { setCountry(event.target.value); setRegistration('') }}>
             <option value="">Choose where your company is registered</option>
-            {Object.entries(registries).map(([key, item]) => <option key={key} value={key}>{item.name}</option>)}
-            <option value="other">Other jurisdiction</option>
+            {jurisdictions.map(item => <option key={item.code} value={item.code}>{item.name}</option>)}
           </select>
         </label>
-        {country === 'other' && <p className="notice">This registry is outside the current signup coverage. Ask your Teder pilot contact about registering it.</p>}
+        {country && !registry && <>
+          <Input label="Issuing registry or authority" name="issuingRegistry" maxLength={120} />
+          <Input label="Company registration identifier" name="registration" maxLength={80} value={registration} onChange={event => setRegistration(event.target.value)} />
+        </>}
         {registry && <>
           {registry.regions.length > 0 && <label>{country === 'US' ? 'State or territory of formation' : 'Issuing registry'}
             <select key={country} name="registryRegion" required defaultValue="">

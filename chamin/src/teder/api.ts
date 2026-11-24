@@ -1,10 +1,11 @@
+import { hashOperatorInvitation } from './operator-identity'
 import { bunkerFees } from './bunker-fees'
 import { bunkerDocuments, maxDocumentBytes } from './bunker-documents'
 import { applyBunkerFulfilment } from './bunker-fulfilment'
 import { z } from 'zod'
 import { clearCookie, createSession, digest, isRecoveryCode, matchesPassword, normalizeCode, passwordHash, readSession } from './security'
 import type { Bindings } from './security'
-import { findRegistry, registryNumber, seatLimit } from './registries'
+import { findRegistry, registryNumber, seatLimit, supportsJurisdiction } from './registries'
 import { sources } from './products'
 
 class Failure extends Error { constructor(message: string, public status = 400) { super(message) } }
@@ -15,7 +16,7 @@ const password = z.string().min(12).max(18).regex(/[a-zA-Z]/).regex(/[0-9]/)
 const code = z.string().max(100).refine(isRecoveryCode)
 const moment = z.number().int().min(0).max(4102444800000)
 const id = () => crypto.randomUUID()
-type User = { id: string; username: string; company_id: string; company_name: string; status: string; role: string; reviewer: number; bunker_operator: number; auth_version: number }
+type User = { id: string; username: string; company_id: string; company_name: string; status: string; role: string; workspace_kind: string; bunker_operator: number; auth_version: number }
 type Deal = { id: string; buyer_id: string; seller_id: string; request_id: string; start_at: number; end_at: number; agreement_ref: string | null; buyer_signed_at: number | null; seller_signed_at: number | null; schedule_ref: string | null; current_delivery_id: string | null; delivery_status: string | null; kw: number }
 type Val = string | number | null
 function response(data: unknown, status = 200, cookie?: string) {
@@ -117,13 +118,30 @@ export async function tederApi(req: Request, env: Bindings): Promise<Response> {
     }
     if (action === 'register') {
       await quota(env, action, ip, 20, 3600000)
-      const input = z.object({ username, password, code, recoveryConfirmation: code, saved: z.literal(true), company: z.string().trim().max(120).optional(), registration: z.string().trim().max(80).optional(), country: z.string().max(2).optional(), registryRegion: z.string().max(3).optional(), invite: z.string().trim().max(100).optional() }).parse(body)
+      const input = z.object({ username, password, code, recoveryConfirmation: code, saved: z.literal(true), company: z.string().trim().max(120).optional(), registration: z.string().trim().max(80).optional(), country: z.string().max(2).optional(), registryRegion: z.string().max(3).optional(), invite: z.string().trim().max(100).optional(), operatorInvite: z.string().regex(/^[a-f0-9]{64}$/).optional(), issuingRegistry: z.string().trim().max(120).optional() }).parse(body)
       if (normalizeCode(input.code) !== normalizeCode(input.recoveryConfirmation)) throw new Failure('Paste the recovery code you copied.')
+      if (input.username.startsWith('ops-') && !input.operatorInvite) throw new Failure('Choose a customer username without the ops- prefix.')
       const userId = id()
       if (await statement('SELECT id FROM users WHERE username=?', input.username).first()) throw new Failure('That username is taken.', 409)
       const [hashed, recovery] = await Promise.all([passwordHash(input.password, secret), digest(secret, 'recovery', normalizeCode(input.code))])
       try {
-        if (input.invite) {
+        if (input.operatorInvite) {
+          const token = await hashOperatorInvitation(input.operatorInvite)
+          const companyId = id()
+          const [claim] = await db.batch([
+            statement(`INSERT INTO companies (id,name,registration,workspace_kind)
+              SELECT ?,'Teder Operations',?,'operations' FROM bunker_operator_invites
+              WHERE token_hash=? AND username=? AND used_by IS NULL AND expires_at>?`,
+              companyId, 'ops:' + companyId, token, input.username, now),
+            statement(`INSERT INTO users (id,username,password_hash,recovery_hash,company_id,role)
+              SELECT ?,?,?,?,id,'owner' FROM companies WHERE id=?`, userId,input.username,hashed,recovery,companyId),
+            statement(`UPDATE bunker_operator_invites SET used_by=? WHERE token_hash=? AND EXISTS (SELECT 1 FROM users WHERE id=?)`,
+              userId,token,userId),
+            statement(`INSERT INTO bunker_operators (user_id,granted_at) SELECT id,? FROM users WHERE id=?`, now,userId),
+            statement(`INSERT INTO bunker_operator_events SELECT ?,id,'activated',? FROM users WHERE id=?`, id(),now,userId),
+          ])
+          if (!claim.meta.changes) throw new Failure('This operator invitation is unavailable. Check the username and request a current invitation.', 409)
+        } else if (input.invite) {
           const invite = await digest(secret, 'invite', input.invite)
           const [result] = await db.batch([
             statement(`INSERT INTO users (id,username,password_hash,recovery_hash,company_id,role)
@@ -138,15 +156,16 @@ export async function tederApi(req: Request, env: Bindings): Promise<Response> {
           const region = input.registryRegion ?? ''
           const registry = findRegistry(country)
           const number = registryNumber(country, input.registration ?? '')
-          if (!input.company || !registry) throw new Failure('Enter the legal company name and select a supported registration jurisdiction.')
-          if (registry.regions.length ? !registry.regions.some(([code]) => code === region) : region !== '') {
+          if (!input.company || !supportsJurisdiction(country)) throw new Failure('Enter the legal company name and select a supported registration jurisdiction.')
+          if (registry?.regions.length ? !registry.regions.some(([code]) => code === region) : region !== '') {
             throw new Failure('Choose the correct issuing jurisdiction.')
           }
-          if (!registry.pattern.test(number)) throw new Failure('Check the registered company identifier.')
+          if (registry ? !registry.pattern.test(number) : !number || !input.issuingRegistry) throw new Failure('Check the registered company identifier.')
           const companyId = id()
           await db.batch([
-            statement('INSERT INTO companies (id,name,registration,country,registry_region,registry_number) VALUES (?,?,?,?,?,?)',
-              companyId, input.company, 'registry:' + companyId, country, region, number),
+            statement('INSERT INTO companies (id,name,registration,country,registry_region,registry_number,issuing_registry) VALUES (?,?,?,?,?,?,?)',
+              companyId, input.company, 'registry:' + companyId, country,
+              registry ? region : input.issuingRegistry!.toUpperCase().replace(/\s+/g,' '), number, input.issuingRegistry ?? null),
             statement(`INSERT INTO users (id,username,password_hash,recovery_hash,company_id,role) VALUES (?,?,?,?,?,'owner')`, userId, input.username, hashed, recovery, companyId),
           ])
         }
@@ -180,11 +199,11 @@ export async function tederApi(req: Request, env: Bindings): Promise<Response> {
       return response({ ok: true }, 200, clearCookie)
     }
     const claims = await readSession(req, env)
-    const user = claims && await statement(`SELECT u.id,u.username,u.company_id,u.role,u.reviewer,u.auth_version, CASE WHEN EXISTS (SELECT 1 FROM bunker_operators o WHERE o.user_id=u.id AND o.revoked_at IS NULL) THEN 1 ELSE 0 END bunker_operator,c.name company_name,c.status
+    const user = claims && await statement(`SELECT u.id,u.username,u.company_id,u.role,u.auth_version,c.workspace_kind, CASE WHEN c.workspace_kind='operations' AND EXISTS (SELECT 1 FROM bunker_operators o WHERE o.user_id=u.id AND o.revoked_at IS NULL) THEN 1 ELSE 0 END bunker_operator,c.name company_name,c.status
       FROM users u JOIN companies c ON c.id=u.company_id JOIN sessions s ON s.user_id=u.id
       WHERE u.id=? AND s.id=? AND u.auth_version=? AND s.expires_at>?`,
       claims.sub, claims.sid, claims.ver, Math.floor(now / 1000)).first<User>()
-    if (action === 'session') return response({ user: user || null })
+    if (action === 'session') return response({ user: user ? { ...user, reviewer: user.bunker_operator } : null })
     if (!user || !claims) throw new Failure('Sign in to continue.', 401)
     const org = user.company_id
     if (action === 'logout') {
@@ -344,13 +363,38 @@ export async function tederApi(req: Request, env: Bindings): Promise<Response> {
       }
       return response({ ok: true })
     }
+    if (action === 'companyApplication') {
+      return response({ applications: await all(`SELECT contact_email,registry_reference,authority_reference,submitted_at,decision,decision_note,decided_at
+        FROM company_applications WHERE company_id=? ORDER BY submitted_at DESC LIMIT 20`, org) })
+    }
+    if (action === 'submitCompanyApplication') {
+      if (user.role !== 'owner' || user.workspace_kind !== 'customer') throw new Failure('Customer workspace owner access required.',403)
+      const input = z.object({ email:z.email().max(254), registry:text(500), authority:text(500) }).parse(body)
+      const [inserted] = await db.batch([
+        statement(`INSERT INTO company_applications (id,company_id,contact_email,registry_reference,authority_reference,submitted_by,submitted_at)
+          SELECT ?,id,?,?,?,?,? FROM companies WHERE id=? AND workspace_kind='customer' AND status<>'approved'
+          ON CONFLICT DO NOTHING`, id(),input.email,input.registry,input.authority,user.id,now,org),
+        statement(`UPDATE companies SET status='pending' WHERE id=? AND changes()=1`,org),
+      ])
+      if (!inserted.meta.changes) throw new Failure('An application is already pending or your company is approved.',409)
+      return response({ ok:true })
+    }
     if (action === 'reviewList' || action === 'review') {
-      if (!user.reviewer) throw new Failure('Reviewer access required.', 403)
-      if (action === 'reviewList') return response({ companies: await all('SELECT * FROM companies WHERE id<>? ORDER BY status,name LIMIT 200', org) })
-      const input = z.object({ companyId: uuid, result: z.enum(['approved','rejected']), note: text(500) }).parse(body)
-      await changed('UPDATE companies SET status=?,reviewed_by=?,reviewed_at=?,review_note=? WHERE id=? AND id<>?',
-        input.result, user.id, now, input.note, input.companyId, org)
-      return response({ ok: true })
+      if (!user.bunker_operator) throw new Failure('Reviewer access required.', 403)
+      if (action === 'reviewList') return response({ companies: await all(`SELECT c.id,c.name,c.country,c.registry_region,c.registry_number,
+        c.issuing_registry,c.registration,c.status,c.review_note,a.id application_id,a.contact_email,a.registry_reference,a.authority_reference
+        FROM company_applications a JOIN companies c ON c.id=a.company_id WHERE a.decision IS NULL
+        ORDER BY a.submitted_at LIMIT 200`) })
+      const input = z.object({ companyId:uuid, applicationId:uuid, result:z.enum(['approved','rejected']), note:text(500) }).parse(body)
+      const [decision] = await db.batch([
+        statement(`UPDATE company_applications SET decision=?,decision_note=?,decided_by=?,decided_at=?
+          WHERE id=? AND company_id=? AND decision IS NULL AND EXISTS (SELECT 1 FROM bunker_operators WHERE user_id=? AND revoked_at IS NULL)`,
+          input.result,input.note,user.id,now,input.applicationId,input.companyId,user.id),
+        statement(`UPDATE companies SET status=?,reviewed_by=?,reviewed_at=?,review_note=? WHERE id=? AND changes()=1`,
+          input.result,user.id,now,input.note,input.companyId),
+      ])
+      if (!decision.meta.changes) throw new Failure('This application was already decided or is no longer available.',409)
+      return response({ ok:true })
     }
     if (action === 'team') return response({
       members: await all("SELECT username,role FROM users WHERE company_id=? ORDER BY role<>'owner', username", org),
@@ -358,6 +402,7 @@ export async function tederApi(req: Request, env: Bindings): Promise<Response> {
       seatLimit,
     })
     if (action === 'invite' || action === 'revokeInvite') {
+      if (user.workspace_kind !== 'customer') throw new Failure('Operations access is provisioned separately.', 403)
       if (user.role !== 'owner') throw new Failure('Only the company owner can manage invitations.', 403)
       if (action === 'revokeInvite') {
         const { inviteId } = z.object({ inviteId: z.string().regex(/^[a-f0-9-]{32,36}$/) }).parse(body)

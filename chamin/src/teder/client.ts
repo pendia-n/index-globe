@@ -7,7 +7,7 @@ export async function call<T>(action: string, params: Record<string, unknown> = 
   }
   return data as T
 }
-export type User = { id: string; username: string; company_id: string; company_name: string; role: string; status: string; reviewer: number; bunker_operator: number }
+export type User = { id: string; username: string; company_id: string; company_name: string; role: string; status: string; workspace_kind: string; reviewer: number; bunker_operator: number }
 type FormProps = { onSubmit: (data: FormData) => Promise<void>; children: React.ReactNode; submit: string; disabled?: boolean }
 export type { FormProps }
 export function field(data: FormData, name: string) { return String(data.get(name) ?? '') }

@@ -9,6 +9,8 @@ The buyer and seller sign and settle outside Teder. A delivery report identifies
 
 ## Operator setup
 
-From `chamin/`, run `node scripts/grant-reviewer.mjs <registered-username>` using an authenticated Wrangler account after confirming the identity of the intended reviewer. That grants review access to an existing company owner. The reviewer can then approve other companies from Company Reviews. Registration does not grant reviewer access or activate a company for trading.
+Use a dedicated operations identity. Verify the staff member independently, then run `node scripts/grant-reviewer.mjs invite ops-username --remote` from `chamin/` using the authenticated platform account. Send the generated activation link privately to that person. It expires in one hour and binds to the specified username. Activation creates a separate operations workspace and records the grant. Use `node scripts/grant-reviewer.mjs revoke ops-username --remote` to remove access and sign out the operator. Customer registrations and old reviewer flags do not grant company review privileges.
+
+A customer owner submits registry and authority references from the workspace. Operations then reviews the application, records an applicant-visible decision, and can review a corrected submission. Company approval does not open a port or license a supplier. Verify supplier eligibility separately for each port before activating quotes.
 
 Use `pnpm build` and the global `wrangler deploy --config dist/server/wrangler.json` to release. Apply D1 migrations separately with `wrangler d1 migrations apply DB --remote`. The production Worker needs only the named JWT secret. Keep the ignored .env private and upload only that key as a Worker secret.

@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { call, field, localTime, time } from './client'
 import type { User } from './client'
 import { Copy, Form, Input, Notes } from './forms'
-import { findRegistry } from './registries'
+import { findRegistry, jurisdictionName } from './registries'
 import { sources } from './products'
 
 type BuyRequest = { id: string; buyer_id: string; buyer_name: string; seller_name: string; point: string; requirements: string; kw: number; start_at: number; end_at: number; closes_at: number; deal_id: string | null; tender_id: string | null; source: keyof typeof sources | null; tender_closed: number; supplier_count: number }
@@ -13,7 +13,8 @@ type Comparison = { request_id: string; seller_name: string; seller_status: stri
 type Supplier = { id: string; name: string; country: string | null }
 type TeamData = { members: { username: string; role: string }[]; invites: { invite_id: string; role: string; expires_at: number }[]; seatLimit: number }
 type Detail = { comparison: Comparison[]; request: BuyRequest; deal: Deal | null; offers: Offer[]; deliveries: Delivery[]; events: { id: string; kind: string; detail: string; occurred_at: number }[] }
-type Company = { id: string; name: string; registration: string; country: string | null; registry_region: string | null; registry_number: string | null; status: string; review_note: string | null }
+type Company = { id: string; name: string; registration: string; country: string | null; registry_region: string | null; registry_number: string | null; issuing_registry: string | null; application_id: string; contact_email: string; registry_reference: string; authority_reference: string }
+type Application = { contact_email: string; registry_reference: string; authority_reference: string; submitted_at: number; decision: string | null; decision_note: string | null }
 function quantity(r: BuyRequest) { return r.kw * (r.end_at - r.start_at) / 3600000 / 1000 }
 const decimal = new Intl.NumberFormat('en-SG', { maximumFractionDigits: 6 })
 const price = new Intl.NumberFormat('en-SG', { currency: 'SGD', style: 'currency' })
@@ -46,6 +47,7 @@ function Overview({ user }: { user: User }) {
       {canTrade && <button type="button" onClick={() => setCreate(!create)}>{create ? 'Close request form' : 'New supply request'}</button>}</div>
     <div className="notice"><strong>{user.status === 'approved' ? 'Company approved' : user.status === 'rejected' ? 'Trading access declined' : 'Company review pending'}</strong>
       <p>{user.status === 'approved' ? 'Invite suppliers to quote on the same delivery requirement.' : 'A reviewer needs to confirm your company and trading authority before you can submit offers or open requests.'}</p></div>
+    {user.workspace_kind === 'customer' && user.status !== 'approved' && <CompanyApplication user={user} />}
     {create && <CreateTender />}
     <h2>Private requests and deals</h2>
     {error ? <p role="alert" className="error">{error}</p> : !requests ? <p role="status">Loading requests…</p> :
@@ -113,13 +115,42 @@ function Team({ user }: { user: User }) {
           await refresh()
         }}><span className="sr-only">Invitation for a {invite.role}</span></Form></li>)}</ul></>}
     </section>}
-    {user.role === 'owner' && data && <section className="boxed"><h2>Invite a teammate</h2><p>{used >= data.seatLimit ? 'All five seats are occupied or reserved. Revoke an unused invitation to make its seat available.' : 'Each person gets their own account. Share the single-use link privately. It expires in 24 hours.'}</p>
+    {user.role === 'owner' && user.workspace_kind === 'customer' && data && <section className="boxed"><h2>Invite a teammate</h2><p>{used >= data.seatLimit ? 'All five seats are occupied or reserved. Revoke an unused invitation to make its seat available.' : 'Each person gets their own account. Share the single-use link privately. It expires in 24 hours.'}</p>
       <Form submit="Create invitation" disabled={used >= data.seatLimit} onSubmit={async form => {
         setLink((await call<{ link: string }>('invite', { role: field(form, 'role') })).link)
         await refresh()
       }}>
         <label>Role<select name="role"><option value="trader">Trader · requests and offers</option><option value="operator">Operator · delivery records</option><option value="viewer">Viewer · read access</option></select></label>
       </Form>{link && <><p className="code">{link}</p><Copy value={link}>Copy invitation link</Copy></>}</section>}
+  </section>
+}
+
+function CompanyApplication({ user }: { user: User }) {
+  const [history, setHistory] = useState<Application[] | null>(null)
+  const [error, setError] = useState('')
+  async function refresh() { setHistory((await call<{ applications: Application[] }>('companyApplication')).applications) }
+  useEffect(() => { refresh().catch(err => setError(err.message)) }, [])
+  const recent = history?.[0]
+  const submit = user.role === 'owner' && user.status !== 'approved' && !!history && (!recent || recent.decision === 'rejected')
+  return <section className="boxed">
+    <h2>Company verification</h2>
+    {error && <p className="error" role="alert">{error}</p>}
+    {recent && <p role="status">{recent.decision === 'rejected' ? 'Changes required' : recent.decision === 'approved' ? 'Approved' : 'Under review'}</p>}
+    {!!history?.length && <details open={recent?.decision === 'rejected'}><summary>Application history</summary>
+      <ul className="records">{history.map((application,index) => <li key={application.submitted_at + ':' + index}>
+        <b>{application.decision ?? 'Pending'}</b> · {time(application.submitted_at)}
+        {application.decision_note && <p>{application.decision_note}</p>}
+      </li>)}</ul>
+    </details>}
+    {submit && <Form submit={recent ? 'Resubmit for review' : 'Submit for review'} onSubmit={async data => {
+      await call('submitCompanyApplication',{ email:field(data,'email'), registry:field(data,'registry'), authority:field(data,'authority') })
+      await refresh()
+    }}>
+      <p>Provide the registry record and how Teder can independently confirm your authority to act for this company.</p>
+      <Input label="Business contact email" name="email" type="email" maxLength={254} defaultValue={recent?.contact_email} />
+      <Input label="Registry record reference or URL" name="registry" maxLength={500} defaultValue={recent?.registry_reference} />
+      <Input label="Evidence of your authority to represent the company" name="authority" maxLength={500} defaultValue={recent?.authority_reference} />
+    </Form>}
   </section>
 }
 
@@ -130,12 +161,13 @@ function Review({ user }: { user: User }) {
   useEffect(() => { if (user.reviewer) refresh().catch(err => setError(err.message)) }, [user.reviewer])
   if (!user.reviewer) return <section className="workspace"><h1>Reviewer access required</h1><a href="/workspace">Back to workspace</a></section>
   return <section className="workspace"><span className="eyebrow">Trading access</span><h1>Company reviews</h1>
-    <p>Confirm the company identity, authority and pilot market eligibility with independent records before granting access.</p>
+    <p>Independently confirm legal identity and representative authority. Record the reason for your decision. Port and supplier eligibility are managed separately.</p>
     {error && <p className="error" role="alert">{error}</p>}
     {companies?.length === 0 && <p>No companies to review.</p>}
-    {companies?.map(c => <section key={c.id} className="boxed"><h2>{c.name}</h2><p>{c.country ? (findRegistry(c.country)?.name ?? c.country) + (c.registry_region ? ' · ' + c.registry_region : '') : 'Registry not recorded'} · {c.registry_number ?? c.registration} · {c.status}</p>{c.review_note && <p>{c.review_note}</p>}
-      <Form submit="Save review" onSubmit={async data => { await call('review', { companyId: c.id, result: field(data, 'result'), note: field(data, 'note') }); await refresh() }}>
-        <label>Decision<select name="result"><option value="approved">Approve trading</option><option value="rejected">Decline trading</option></select></label>
+    {companies?.map(c => <section key={c.id} className="boxed"><h2>{c.name}</h2><p>{c.country ? jurisdictionName(c.country) + (c.issuing_registry || c.registry_region ? ' · ' + (c.issuing_registry ?? c.registry_region) : '') : 'Registry not recorded'} · {c.registry_number ?? c.registration}</p>
+      <dl><dt>Business email</dt><dd>{c.contact_email}</dd><dt>Registry evidence</dt><dd>{c.registry_reference}</dd><dt>Authority evidence</dt><dd>{c.authority_reference}</dd></dl>
+      <Form submit="Save review" onSubmit={async data => { await call('review', { companyId: c.id, applicationId: c.application_id, result: field(data, 'result'), note: field(data, 'note') }); await refresh() }}>
+        <label>Decision<select name="result" required defaultValue=""><option value="">Choose a decision</option><option value="approved">Approve trading</option><option value="rejected">Decline trading</option></select></label>
         <Notes label="Review evidence or reason" name="note" maxLength={500} />
       </Form></section>)}
   </section>
