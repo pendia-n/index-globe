@@ -128,3 +128,12 @@ dd { margin: 0; }
 .interval-table { overflow-x: auto; max-height: 20rem; margin-top: .5rem; }
 .interval-table table { width: 100%; border-collapse: collapse; text-align: left; }
 .interval-table th, .interval-table td { padding: .45rem; border-bottom: 1px solid var(--line); }
+.offer-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,260px),1fr)); gap:1rem; margin-block:1.2rem; }
+.market-card { padding:1.3rem; background:var(--surface); border:1px solid var(--line); border-top:3px solid var(--marker); overflow-wrap:anywhere; }
+.market-card:nth-child(2n) { border-top-color:#846048; }
+a.secondary-link { background:transparent; color:inherit; border-color:currentColor; }
+.notice { padding:1rem; background:#ece5dc; border-left:3px solid var(--marker); margin-block:1rem; }
+details { margin-block:1rem; padding:1rem; border:1px solid var(--line); }
+summary { cursor:pointer; font-weight:650; }
+dd { margin:0; overflow-wrap:anywhere; }
+@media(max-width:600px) { dl { grid-template-columns:1fr; } dt { font-weight:700; } .masthead { align-items:flex-start; } .masthead nav { justify-content:flex-end; font-size:.85rem; } }

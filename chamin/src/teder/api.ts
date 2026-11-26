@@ -1,3 +1,4 @@
+import { energyApi } from './energy-api'
 import { brokerAccess } from './bunker-brokers'
 import { hashOperatorInvitation } from './operator-identity'
 import { bunkerFees } from './bunker-fees'
@@ -210,6 +211,7 @@ export async function tederApi(req: Request, env: Bindings): Promise<Response> {
       claims.sub, claims.sid, claims.ver, Math.floor(now / 1000)).first<User>()
     if (action === 'session') return response({ user: user ? { ...user, reviewer: user.bunker_operator } : null })
     if (!user || !claims) throw new Failure('Sign in to continue.', 401)
+    if (action.startsWith('energy')) return energyApi(action, body, env, user)
     const org = user.company_id
     if (action === 'logout') {
       await statement('DELETE FROM sessions WHERE id=? AND user_id=?', claims.sid, user.id).run()
@@ -218,7 +220,7 @@ export async function tederApi(req: Request, env: Bindings): Promise<Response> {
     if (action === 'tradeInbox' || action === 'tradeInboxRead') {
       const visibility = '(n.company_id=? OR n.user_id=? OR (n.operations=1 AND ?=1))'
       const visibilityArgs: Val[] = [org,user.id,user.bunker_operator]
-      const views = ['trade_notice_1','trade_notice_2','trade_notice_3','trade_notice_4','trade_notice_5']
+      const views = ['trade_notice_1','trade_notice_2','trade_notice_3','trade_notice_4','trade_notice_5','trade_notice_6']
       if (action === 'tradeInboxRead') {
         const { notificationId } = z.object({ notificationId:text(150) }).parse(body)
         await db.batch(views.map(view => statement(`INSERT INTO trade_notification_reads (user_id,notification_id,read_at)

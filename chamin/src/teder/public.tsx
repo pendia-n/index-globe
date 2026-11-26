@@ -1,38 +1,17 @@
-import { ArrowUpRight } from 'lucide-react'
 import type { User } from './client'
-
+import { energyProducts } from './energy-products'
 export function Brand() {
-  return <a href="/" className="brand" aria-label="Teder home"><img src="/teder.svg" alt="" width="35" height="35" />teder</a>
+ return <a href="/" className="brand" aria-label="Teder home"><img src="/teder.svg" alt="" width="35" height="35"/>teder</a>
 }
-
-export function Landing({ user }: { user: User | null }) {
-  return <>
-    <section className="hero">
-      <div className="hero-copy">
-        <p className="eyebrow">Private energy procurement</p>
-        <h1>Source marine fuel</h1>
-        <p>Send your vessel’s fuel requirements and delivery window. We’ll check whether the port and grade can be supported.</p>
-        <div className="hero-actions">
-          <a className="button" href="/bunker">Submit a bunker request <ArrowUpRight size={18} /></a>
-          {user && <a href="/workspace/bunkers">Open marine fuel workspace</a>}
-        </div>
-      </div>
-    </section>
-    <section className="information" id="markets">
-      <h2>Port enquiries</h2>
-      <p>Submit requests for Singapore, Fujairah, or Rotterdam. Availability depends on the order and supplier.</p>
-    </section>
-  </>
+export function Landing({user}:{user:User|null}) {
+ return <><section className="hero"><div className="hero-copy"><p className="eyebrow">Private physical energy procurement</p><h1>Bring your next energy deal.</h1><p>Find supply for a real requirement. Put available supply in front of relevant buyers. Run private tenders and follow the deal through delivery and payment.</p><div className="hero-actions"><a className="button" href={user?'/workspace/energy/new?side=buy':'/supply'}>I need supply</a><a className="button secondary-link" href={user?'/workspace/energy/new?side=sell':'/sell'}>I have supply</a></div></div></section>
+ <section className="information" id="markets"><h2>Energy, across markets</h2><div className="offer-grid">{Object.entries(energyProducts).map(([key,name])=><article className="market-card" key={key}><h3>{name}</h3></article>)}</div><p>Global enquiries are welcome. Execution opens for a specific route after company, delivery and operating checks.</p><a href="/bunker">Marine fuel · existing port enquiry service</a></section>
+ <section className="information"><h2>From requirement to a usable offer</h2><ol><li>Describe quantity, specification, delivery point and timing.</li><li>Teder assigns an operator and records the next action. You authorize relevant introductions.</li><li>Qualified counterparties respond privately. Compare price basis, exclusions, credit and delivery terms.</li><li>Agree the contract, payment security and service fee. Track delivery evidence, exceptions and receipt confirmations.</li></ol><p>Your company workspace shows progress and outstanding actions. Supplier availability and delivery feasibility are confirmed for each request.</p></section></>
 }
-
-export function Information({ page }: { page: string }) {
-  if (page === '/announcements') return <section className="information"><h1>Announcements</h1><p>No announcements yet.</p><a href="/bunker">Request or check marine fuel coverage</a></section>
-  if (page === '/pricing') return <section className="information"><h1>Pricing</h1><p>Teder agrees any service fee with the payer separately. The fuel supplier invoices the buyer for the fuel under their agreement.</p><a className="button" href="/bunker">Submit a bunker request</a></section>
-  return <section className="information"><h1>About Teder</h1>
-    <p>Teder gives buyers, suppliers, and their appointed brokers a private workspace for marine fuel procurement.</p>
-    <h2>Company verification</h2><p>Register a workspace for your legal entity and submit evidence of your authority to act. Approval is separate from supplier or broker eligibility at a port.</p>
-    <h2>Quotes and orders</h2><p>Buyers and their appointed brokers can invite eligible suppliers for an active port. Suppliers quote privately. The buyer selects an offer and the supplier confirms the order.</p>
-    <h2>Delivery and settlement</h2><p>The buyer and supplier arrange delivery and payment under their agreement. Teder records nomination, shared evidence, disputes, invoices, and receipt confirmations.</p>
-    <a className="button" href="/bunker">Request marine fuel</a>
-  </section>
+export function Information({page}:{page:string}) {
+ if(page==='/terms')return <section className="information"><h1>Service terms</h1><p>Teder provides private sourcing, tender coordination and a shared record for business energy transactions. Each company is responsible for its submissions and its representatives’ authority.</p><h2>Requests and permissions</h2><p>Submitting a case authorizes Teder to seek relevant counterparties within your sharing instructions. Company approval and route clearance are required before private quoting. Indications remain subject to availability, delivery rights and agreed contracts.</p><h2>Contracts and responsibilities</h2><p>The parties agree their contract, delivery, inspection, scheduling and payment arrangements with responsible providers. Record the contract version, payment security, provider, conditions, fee payer and fee trigger before both parties confirm acceptance.</p><h2>Fees and disputes</h2><p>Teder’s fee requires a recorded agreement. Raise discrepancies in the case workspace. A payment claim requires recipient confirmation. Contractual remedies and dispute venue follow the signed agreement.</p><h2>Support and access</h2><p>Protect your recovery code and use named company seats. Request operational help through your case or company-review submission.</p></section>
+ if(page==='/privacy')return <section className="information"><h1>Privacy and confidential data</h1><p>Teder stores protected credential verifiers, company authority references, sourcing requirements, business contacts, private offers and transaction history to operate the service.</p><h2>Access</h2><p>Your company and authorized Teder operations can access your case. Invited counterparties receive requirements needed to quote and see their own offers. Contract, delivery and payment records are available to the case owner, selected supplier and operations.</p><h2>Storage and requests</h2><p>Records use Cloudflare infrastructure. Optional drafts stay in your browser session storage. Clear drafts on shared devices. Request correction, export or deletion through a private case or company-review submission. Operations assesses contractual and legal retention requirements before deletion.</p><p>Case histories preserve actions for reconciliation. Submit information you are authorized to share.</p></section>
+ if(page==='/pricing')return <section className="information"><h1>Agree the fee before proceeding</h1><p>Record the fee payer, amount or formula, trigger and cancellation terms for each mandate. Both parties review these terms before confirming the contract. The supplier invoices the buyer separately for energy.</p><a className="button" href="/supply">Bring a requirement</a></section>
+ if(page==='/announcements')return <section className="information"><h1>Service availability</h1><p>Global energy intake is open. An operator reviews each delivery route before quoting. Check your private workspace for the next action.</p></section>
+ return <section className="information"><h1>About Teder</h1><p>Teder connects business energy requirements with available supply through private sourcing and tender management.</p><h2>Company and route review</h2><p>Register your legal entity and submit authority evidence. A dedicated operator reviews your company. Each tender also needs evidence of responsible delivery participants, access rights, credit and applicable requirements.</p><h2>Private negotiation and execution records</h2><p>Invite approved companies, compare offers and record the agreed contract process. Keep delivery evidence, receipt confirmations, fees and exceptions together.</p><a className="button" href="/supply">I need supply</a> <a href="/sell">I have supply</a></section>
 }

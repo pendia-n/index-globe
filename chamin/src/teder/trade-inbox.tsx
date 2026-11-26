@@ -3,6 +3,8 @@ import { call } from './client'
 
 type Notice = { id:string; kind:string; href:string; occurred_at:number; read_at:number|null }
 const titles: Record<string,string> = {
+  energy_update:'Your energy case has an update',
+  energy_invitation:'Your company was invited to an energy tender',
   enquiry_received:'A new bunker enquiry needs review',
   enquiry_assigned:'A bunker enquiry was assigned to your company',
   company_application:'A company submitted an application',
