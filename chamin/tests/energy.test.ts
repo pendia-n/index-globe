@@ -26,7 +26,8 @@ function actor(name:string,operator=0,status='approved'){
 const buyer=actor('buyer'),seller=actor('seller'),rival=actor('rival'),outsider=actor('outsider'),ops=actor('ops',1)
 async function request(user:any,action:string,body:any={},status=200){const response=await energyApi(action,{action,...body},env,user);const data:any=await response.json();assert.equal(response.status,status,JSON.stringify(data));return data}
 const caseId=crypto.randomUUID()
-await request(buyer,'energyCreate',{requestKey:caseId,side:'buy',product:'gas',country:'GB',deliveryPoint:'NBP',title:'Industrial gas requirement',quantity:'100 MWh/day',window:'December UTC',specification:'Pipeline specification',deliveryTerms:'Qualified shipper arranges delivery',contact:'buyer@example.test',consent:true,validUntil:Date.now()+86400000},201)
+await request(buyer,'energyCreate',{requestKey:caseId,side:'buy',product:'gas',country:'GB',deliveryPoint:'NBP',title:'Industrial gas requirement',quantity:'100 MWh/day',window:'December UTC',specification:'Pipeline specification',deliveryTerms:'Qualified shipper arranges delivery',contact:'buyer@example.test',credit:'LC',masterAgreement:'Physical supply agreement',mandateReference:'Site mandate',consent:true,validUntil:Date.now()+86400000},201)
+sql.prepare('UPDATE energy_cases SET workflow_version=1 WHERE id=?').run(caseId)
 await request(outsider,'energyDetail',{caseId},404)
 let revision=0
 async function change(user:any,change:string,extra:any={}){await request(user,'energyChange',{caseId,revision,change,note:'Evidence checked with responsible parties',reference:'external-evidence-001',...extra});revision++}
@@ -35,14 +36,14 @@ await change(ops,'triage')
 await change(ops,'clear')
 await request(buyer,'energyInvite',{caseId,companyId:seller.company_id})
 await request(buyer,'energyInvite',{caseId,companyId:rival.company_id})
-const quote={caseId,amount:50,currency:'GBP',unit:'MWh delivered',terms:'Transport included; invoice net 15',expiresAt:Date.now()+86400000}
+const quote={caseId,totalMinor:500000,structuredTerms:'Delivered terms',amount:50,currency:'GBP',unit:'MWh delivered',terms:'Transport included; invoice net 15',expiresAt:Date.now()+86400000}
 await request(seller,'energyQuote',quote)
 await request(rival,'energyQuote',{...quote,amount:55})
 assert.equal((await request(seller,'energyDetail',{caseId})).offers.length,1)
 const offer=(await request(buyer,'energyDetail',{caseId})).offers.find((o:any)=>o.company_id===seller.company_id)
 await request(buyer,'energyChange',{caseId,revision,change:'select',note:'Selected',offerId:offer.id,offerRevision:99},409)
 await change(buyer,'select',{offerId:offer.id,offerRevision:0})
-await request(seller,'energyQuote',quote,403)
+await request(seller,'energyQuote',quote,409)
 await request(buyer,'energyChange',{caseId,revision,change:'sign',note:'Premature signature'},409)
 await change(ops,'contract',{note:'Bank guarantee via buyer bank; provider and draw terms verified. Buyer pays Teder GBP 50 after supplier receipt.'})
 await change(buyer,'sign')

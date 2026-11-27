@@ -1,3 +1,8 @@
+import { CommercialTerms, ReviewedOffer, DeliveryInstalments, SourcingRevision, SupplierQuote } from './energy-commercial-ui'
+import type { CommercialOffer, DeliveryLot } from './energy-commercial-ui'
+import { minorUnits } from './money'
+import { TradeContact } from './messages'
+import { Documents } from './documents'
 import { useEffect, useState } from 'react'
 import { call, field } from './client'
 import type { User } from './client'
@@ -6,8 +11,8 @@ import { jurisdictions } from './registries'
 import { energyProducts, specificationHints } from './energy-products'
 import type { EnergyCase } from './energy-products'
 
-type Offer = {revision:number;id:string;company_id:string;company_name:string;amount:number;currency:string;unit:string;terms:string;expires_at:number}
-type Detail = {record:EnergyCase;offers:Offer[];events:{note:string;occurred_at:number}[];companies:{id:string;name:string}[];matches:{id:string;title:string;delivery_point:string;company_name:string}[]}
+type Offer = CommercialOffer
+type Detail = {canUpload:boolean;invitation:{fee_accepted_revision:number|null}|null;lots:DeliveryLot[];versions:{offer_id:string;revision:number;snapshot:string;created_at:number}[];record:EnergyCase;offers:Offer[];events:{note:string;occurred_at:number}[];companies:{id:string;name:string}[];matches:{id:string;title:string;delivery_point:string;company_name:string}[]}
 const date=(value:number)=>new Date(value).toLocaleString()+' (your local time)'
 export function EnergyWorkspace({user,path}:{user:User;path:string}) {
  const [records,setRecords]=useState<EnergyCase[]>([]), [detail,setDetail]=useState<Detail|null>(null), [error,setError]=useState('')
@@ -24,10 +29,10 @@ export function EnergyWorkspace({user,path}:{user:User;path:string}) {
   } catch(e) {setError(e instanceof Error?e.message:'Could not load energy cases.')}
  }
  useEffect(()=>{void refresh()},[path])
- async function act(action:string,values:Record<string,unknown>) {await call(action,{caseId,...values});await refresh()}
+ async function act(action:string,values:Record<string,unknown>) {await call(action,{caseId,revision:detail?.record.revision,...values});await refresh()}
  const selected=detail?.offers.find(o=>o.id===detail.record.selected_offer)
  const owner=detail?.record.company_id===user.company_id, seller=selected?.company_id===user.company_id
- const mutable=user.role!=='viewer', operator=!!user.bunker_operator
+ const mutable=user.role!=='viewer'&&user.role!=='applicant', operator=!!user.bunker_operator
  const closed=detail&&['closed','cancelled'].includes(detail.record.state)
  function changeForm(change:string,label:string,reference=false) {
   if(!detail||!mutable||closed)return null
@@ -50,6 +55,7 @@ export function EnergyWorkspace({user,path}:{user:User;path:string}) {
    <div className="pair"><Input label="Quantity and unit / power and energy capacity" name="quantity" maxLength={100}/><Input label="Delivery window and time zone" name="window" maxLength={200}/></div>
    <Notes label={specificationHints[product]} name="specification" maxLength={3000}/>
    <Notes label="Delivery terms, responsible operators, access rights, payment/credit expectations and confidential handling instructions" name="deliveryTerms" maxLength={1500}/>
+   <Notes label="Credit and payment readiness · acceptable prepayment, open credit, LC, guarantees and credit limits" name="credit" maxLength={1500}/><Input label="Existing master agreement / contracting requirements" name="masterAgreement" maxLength={1000}/><Input label="Mandate or asset reference · issuer and your authority to procure or offer it" name="mandateReference" maxLength={500}/>
    <Input label="Business contact email" name="contact" type="email" maxLength={254}/><Input label="Response deadline / supply availability expires (your local time)" name="validUntil" type="datetime-local"/>
    <label className="check"><input type="checkbox" name="consent" required/>I authorize Teder to approach relevant counterparties using these requirements, subject to my sharing instructions, and accept the <a href="/terms">service terms</a> and <a href="/privacy">privacy information</a>.</label>
    <div className="hero-actions"><button type="button" className="secondary" onClick={e=>{const form=e.currentTarget.closest('form')!;sessionStorage.setItem('teder-energy-draft',JSON.stringify(Object.fromEntries(new FormData(form))));setSaved(true)}}>Save draft on this device</button><button type="button" className="secondary" onClick={e=>{const raw=sessionStorage.getItem('teder-energy-draft');if(!raw)return;const values=JSON.parse(raw);setProduct(values.product||'gas');const form=e.currentTarget.closest('form')!;for(const [key,value] of Object.entries(values)){const input=form.elements.namedItem(key);if(input instanceof HTMLInputElement&&input.type!=='checkbox'||input instanceof HTMLTextAreaElement||input instanceof HTMLSelectElement)input.value=String(value)}setSaved(false)}}>Restore draft</button></div>{saved&&<p role="status">Draft saved on this device. Clear it after using a shared device.</p>}
@@ -57,7 +63,7 @@ export function EnergyWorkspace({user,path}:{user:User;path:string}) {
  if(!caseId)return <section className="workspace"><div className="section-head"><h1>Energy workspace</h1><button className="secondary" onClick={()=>void refresh()}>Refresh</button></div>
   <p>Global requirements and available supply. Company approval and route review are required before quoting.</p>
   {!operator&&<div className="hero-actions"><a className="button" href="/workspace/energy/new?side=buy">I need supply</a><a className="button secondary-link" href="/workspace/energy/new?side=sell">I have supply</a></div>}
-  {user.status!=='approved'&&!operator&&<p className="notice">Your company review is {user.status}. <a href="/workspace">Submit or check your authority evidence</a>.</p>}
+  {user.status!=='approved'&&!operator&&<p className="notice">Your company review is {user.status}. <a href="/workspace/company">Submit or check your authority evidence</a>.</p>}
   {error&&<p role="alert" className="error">{error}</p>}
   <ul className="records">{records.map(r=><li key={r.id}><a href={'/workspace/energy/'+r.id}><strong>{r.title}</strong><span>{r.side==='buy'?'Requirement':'Available supply'} · {energyProducts[r.product as keyof typeof energyProducts]} · {r.country} · {r.delivery_point}</span><span>{r.state.replaceAll('_',' ')} · {r.next_action}</span><small>Updated {date(r.updated_at)}</small></a></li>)}</ul>{!records.length&&<p>Your submitted cases and private invitations will appear here.</p>}
   {metrics&&<section><h2>Route performance</h2><p>Counts reflect recorded case outcomes. Check fees against bank receipts and record operating cost in the case history.</p><ul className="records">{metrics.routes.map((r,i)=><li key={i}>{String(r.product)} · {String(r.country)} · {String(r.state)} · {String(r.cases)} cases · {String(r.fees_received)} collected fees</li>)}</ul><h3>Repeat fee-paying customers</h3>{metrics.repeat.length?metrics.repeat.map(r=><p key={r.name}>{r.name} · {r.completed} completed cases</p>):<p>No repeat fee-paying cases recorded.</p>}</section>}
@@ -71,15 +77,19 @@ export function EnergyWorkspace({user,path}:{user:User;path:string}) {
   {(owner||operator)&&<p>Business contact · {info.contact}</p>}
   {operator&&!closed&&<details open={!e.operator_id}><summary>Operations · ownership and route review</summary>
    <Form submit="Assign to me and set next action" onSubmit={f=>act('energyChange',{revision:e.revision,change:'triage',note:field(f,'note'),nextAt:Date.parse(field(f,'nextAt'))})}><Notes label="Next action and response commitment" name="note"/><Input label="Next update due (your local time)" type="datetime-local" name="nextAt"/></Form>
-   {['submitted','checking'].includes(e.state)&&changeForm('clear','Confirm route and open sourcing')}
+   {['submitted','checking'].includes(e.state)&&(e.workflow_version===2?<Form submit="Confirm route and publish blind tender brief" onSubmit={f=>act('energyChange',{change:'clear',note:field(f,'note'),reference:field(f,'reference'),blindBrief:field(f,'blindBrief'),routeChecks:field(f,'routeChecks')})}><Notes label="Non-identifying brief · product, quantity, location, dates, specification and credit requirements" name="blindBrief" maxLength={4000}/><Notes label="Recorded route checks · responsible parties, supply/transport rights, licences, sanctions/origin, credit fit and legal-role assessment" name="routeChecks" maxLength={5000}/><Notes label="Case owner’s route decision and next action" name="note" maxLength={3500}/><Input label="Independent sources and confirmation references" name="reference" maxLength={1500}/></Form>:changeForm('clear','Confirm route and open sourcing'))}
    <p>Route review must identify counterparty authority, origin/sanctions checks, delivery/access rights, transport or scheduling responsibility, credit and applicable operating requirements. Record what was checked and who confirmed it.</p>
   </details>}
+  {e.workflow_version===2&&<CommercialTerms record={e} operator={operator} owner={!!owner} invitation={detail.invitation} act={act}/>}
+  {e.blind_brief&&<section><h2>Private tender brief</h2><p>{e.blind_brief}</p></section>}
   {e.route_note&&<section><h2>Route decision</h2><p>{e.route_note}</p></section>}
   {(owner||operator)&&!closed&&<section><h2>Potential matches</h2><p>Same product and delivery country, with current operator-cleared availability. Confirm specification, exact delivery point, dates and quantity before inviting.</p><ul className="records">{detail.matches.map(m=><li key={m.id}>{m.company_name} · {m.title} · {m.delivery_point}</li>)}</ul>{!detail.matches.length&&<p>No matching availability recorded. Teder can seek counterparties with your permission.</p>}
-   {e.side==='buy'&&e.state==='quoting'&&<Form submit="Invite supplier privately" onSubmit={f=>act('energyInvite',{companyId:field(f,'company')})}><label>Approved supplier<select name="company" required><option value="">Choose a company</option>{detail.companies.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}</select></label></Form>}
+   {e.side==='buy'&&e.state==='quoting'&&(operator||e.workflow_version===1)&&<Form submit="Invite supplier privately" onSubmit={f=>act('energyInvite',{companyId:field(f,'company')})}><label>Approved supplier<select name="company" required><option value="">Choose a company</option>{detail.companies.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}</select></label></Form>}
   </section>}
-  {!owner&&!operator&&e.state==='quoting'&&<section><h2>Your private quote</h2><Form submit="Submit / replace quote" onSubmit={f=>act('energyQuote',{amount:Number(field(f,'amount')),currency:field(f,'currency').toUpperCase(),unit:field(f,'unit'),terms:field(f,'terms'),expiresAt:Date.parse(field(f,'expiresAt'))})}><div className="pair"><Input label="Price" name="amount" type="number" min="0.000001" step="any"/><Input label="Currency (ISO code, e.g. USD)" name="currency" pattern="[A-Za-z]{3}" maxLength={3}/></div><Input label="Price basis (e.g. per MWh, tonne, or full delivery)" name="unit" maxLength={80}/><Notes label="Included/excluded transport, specification, volume tolerance, taxes, credit, delivery basis and responsible operator" name="terms" maxLength={3000}/><Input label="Quote expires (your local time)" name="expiresAt" type="datetime-local"/></Form></section>}
-  <section><h2>Private offers</h2><p>Compare currency, price basis and all exclusions before selection. Different terms can change the delivered cost.</p><div className="offer-grid">{detail.offers.map(o=><article className="market-card" key={o.id}><h3>{o.company_name}</h3><strong>{o.currency} {o.amount} / {o.unit}</strong><p>{o.terms}</p><small>Expires {date(o.expires_at)}</small>{owner&&e.state==='quoting'&&<Form submit="Select for contracting" onSubmit={()=>act('energyChange',{revision:e.revision,change:'select',offerId:o.id,offerRevision:o.revision,note:'Buyer selected this offer for contracting.'})}><label className="check"><input type="checkbox" required/>I reviewed the delivery and commercial terms.</label></Form>}</article>)}</div>{!detail.offers.length&&<p>No quotes received yet.</p>}</section>
+  {!owner&&!operator&&e.state==='quoting'&&<SupplierQuote record={e} act={act}/>}
+  {operator&&e.state==='quoting'&&<details><summary>Transcribe an externally supplied offer</summary><SupplierQuote record={e} act={act} assistedCompanies={detail.companies}/></details>}
+  {(owner||operator)&&!e.selected_offer&&!closed&&<SourcingRevision record={e} info={info} act={act}/>}
+  <section><h2>Private offers</h2><p>Review price basis, period value, exclusions and credit. Teder publishes a non-identifying comparison before shortlisting. Identities are disclosed before binding selection.</p><div className="offer-grid">{detail.offers.map(o=><ReviewedOffer key={o.id} offer={o} record={e} operator={operator} owner={!!owner} act={act}/>)}</div>{!detail.offers.length&&<p>No quotes received yet.</p>}</section>
   {(owner||seller||operator)&&e.selected_offer&&<section><h2>Contract, delivery and payment</h2>
    {e.contract_ref&&<p>Contract · {e.contract_ref}</p>}{e.security_ref&&<p>Payment security and agreed service fee · {e.security_ref}</p>}
    <p>Buyer acceptance · {e.buyer_signed?'confirmed':'pending'} · Supplier acceptance · {e.seller_signed?'confirmed':'pending'}</p>
@@ -90,16 +100,22 @@ export function EnergyWorkspace({user,path}:{user:User;path:string}) {
    {owner&&e.state==='delivery_review'&&changeForm('acceptDelivery','Accept delivered quantity and quality')}
    {seller&&e.state==='delivered'&&!e.payment_ref&&changeForm('invoice','Record supplier invoice',true)}
    {e.invoice_ref&&<p>Supplier invoice · {e.invoice_ref}</p>}
-   {owner&&e.state==='delivered'&&!!e.invoice_ref&&changeForm('payment','Report payment to supplier',true)}
+   {e.workflow_version===1&&owner&&e.state==='delivered'&&!!e.invoice_ref&&changeForm('payment','Report payment to supplier',true)}
    {e.payment_ref&&<p>Buyer-reported payment · {e.payment_ref} · {e.payment_received?'Supplier confirmed receipt':'Awaiting supplier receipt confirmation'}</p>}
-   {seller&&e.state==='delivered'&&!!e.payment_ref&&changeForm('receipt','Confirm supplier received payment')}
-   {operator&&e.state==='paid'&&!e.fee_payment_ref&&changeForm('fee','Issue agreed Teder fee invoice',true)}
+   {e.workflow_version===1&&seller&&e.state==='delivered'&&!!e.payment_ref&&changeForm('receipt','Confirm supplier received payment')}
+   {e.workflow_version===1&&operator&&e.state==='paid'&&!e.fee_payment_ref&&changeForm('fee','Issue agreed Teder fee invoice',true)}
    {e.fee_ref&&<p>Teder fee invoice · {e.fee_ref}</p>}
-   {(owner||seller)&&!!e.fee_ref&&!e.fee_received&&changeForm('feePayment','Report Teder fee payment',true)}
+   {e.workflow_version===1&&(owner||seller)&&!!e.fee_ref&&!e.fee_received&&changeForm('feePayment','Report Teder fee payment',true)}
    {e.fee_payment_ref&&<p>Fee payment reported · {e.fee_payment_ref} · {e.fee_received?'Receipt confirmed':'Awaiting Teder receipt confirmation'}</p>}
-   {operator&&!!e.fee_payment_ref&&!e.fee_received&&changeForm('feeReceipt','Confirm Teder actually received fee')}
+   {e.workflow_version===1&&operator&&!!e.fee_payment_ref&&!e.fee_received&&changeForm('feeReceipt','Confirm Teder actually received fee')}
   </section>}
   {!closed&&(owner||seller||operator)&&<details><summary>Exceptions and closure</summary>{e.state!=='exception'&&changeForm('exception','Open an exception and pause progress')}{operator&&e.state==='exception'&&changeForm('resolve','Record resolution and resume',true)}{(owner||operator)&&!e.selected_offer&&changeForm('cancel','Close sourcing with reason')}</details>}
+  {e.workflow_version===2&&e.selected_offer&&(owner||seller||operator)&&<DeliveryInstalments record={e} lots={detail.lots} owner={!!owner} seller={!!seller} operator={operator} act={act}/>}
+  {e.selected_offer&&!closed&&(owner||seller)&&<details><summary>Propose or respond to cancellation</summary>{!e.cancellation_proposed_by?<Form submit="Propose cancellation" onSubmit={f=>act('energyCancelProposal',{note:field(f,'note')})}><Notes label="Proposed cancellation, remaining obligations and refund terms" name="note"/></Form>:<><p>{e.cancellation_note}</p><Form submit="Respond to cancellation" onSubmit={f=>act('energyCancelDecision',{accept:field(f,'decision')==='accept',note:field(f,'note')})}><label>Response<select name="decision"><option value="accept">Accept</option><option value="decline">Decline</option></select></label><Notes label="Reason and outstanding obligations" name="note"/></Form></>}</details>}
+  {operator&&<details><summary>Record cost to serve</summary><Form submit="Save operating cost and time" onSubmit={f=>act('energyCost',{minutes:Number(field(f,'minutes')),costMinor:minorUnits(Number(field(f,'cost')),e.fee_currency),note:field(f,'note')})}><Input label="Total operator minutes" type="number" name="minutes" min="0" defaultValue={e.operating_minutes}/><Input label={'Total external cost · '+e.fee_currency} type="number" name="cost" min="0" step="any"/><Notes label="Basis and external expenses" name="note"/></Form></details>}
+  {owner&&closed&&<Form submit="Start a repeat sourcing mandate" onSubmit={async()=>{const r=await call<{id:string}>('energyRepeat',{caseId:e.id,revision:e.revision});location.assign('/workspace/energy/'+r.id)}}><p>A repeat creates a new case with a new review and agreement.</p></Form>}
+  <TradeContact kind="energy" contextId={e.id}/>{detail.canUpload&&<Documents scope="energy" scopeId={e.id} categories={['contract','route','delivery','quantity','quality','invoice','payment','other']} readOnly={!mutable}/>}
+  {!!detail.versions.length&&<details><summary>Your accessible quote versions</summary><ul className="records">{detail.versions.map((v,i)=><li key={i}>Version {v.revision} · {new Date(v.created_at).toLocaleString()}<pre>{v.snapshot}</pre></li>)}</ul></details>}
   <section><h2>Case history</h2><ul className="records">{detail.events.map((event,i)=><li key={i}><p>{event.note}</p><small>{date(event.occurred_at)}</small></li>)}</ul></section>
  </section>
 }

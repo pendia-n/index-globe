@@ -1,7 +1,7 @@
 const utf8 = new TextEncoder()
 const sessionSeconds = 28 * 86400
 export const cookieName = '__Host-teder_session'
-export type Bindings = { DB: D1Database; TEDER_JWT_SECRET: string }
+export type Bindings = { DB: D1Database; TEDER_JWT_SECRET: string; STRIPE_SECRET_KEY?:string; STRIPE_WEBHOOK_SECRET?:string; STRIPE_MODE?:string }
 
 function base64url(bytes: Uint8Array) {
   return btoa(String.fromCharCode(...bytes)).replace(/=+$/g, '').replace(/\+/g, '-').replace(/\//g, '_')

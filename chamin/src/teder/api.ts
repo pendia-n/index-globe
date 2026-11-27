@@ -1,3 +1,9 @@
+import { paymentsApi } from './payments'
+import { companyAccessApi } from './company-access'
+import { canTrade } from './access'
+import { messagesApi } from './messages-api'
+import { documentsApi, documentLimit } from './documents-api'
+import { verificationApi } from './verification-api'
 import { energyApi } from './energy-api'
 import { brokerAccess } from './bunker-brokers'
 import { hashOperatorInvitation } from './operator-identity'
@@ -18,7 +24,7 @@ const password = z.string().min(12).max(18).regex(/[a-zA-Z]/).regex(/[0-9]/)
 const code = z.string().max(100).refine(isRecoveryCode)
 const moment = z.number().int().min(0).max(4102444800000)
 const id = () => crypto.randomUUID()
-type User = { id: string; username: string; company_id: string; company_name: string; status: string; role: string; workspace_kind: string; bunker_operator: number; auth_version: number }
+type User = { id: string; username: string; company_id: string; company_name: string; status: string; role: string; workspace_kind: string; bunker_operator: number; auth_version: number; authority_status:string; authority_until:number|null;can_request:number;can_offer:number;can_accept:number }
 type Deal = { id: string; buyer_id: string; seller_id: string; request_id: string; start_at: number; end_at: number; agreement_ref: string | null; buyer_signed_at: number | null; seller_signed_at: number | null; schedule_ref: string | null; current_delivery_id: string | null; delivery_status: string | null; kw: number }
 type Val = string | number | null
 function response(data: unknown, status = 200, cookie?: string) {
@@ -41,8 +47,10 @@ export async function tederApi(req: Request, env: Bindings): Promise<Response> {
     if (req.method !== 'POST') return response({ error: 'Use POST.' }, 405)
     if (req.headers.get('origin') !== new URL(req.url).origin) throw new Failure('Invalid request origin.', 403)
     if (!req.headers.get('content-type')?.startsWith('application/json')) throw new Failure('Send a JSON request.', 415)
-    const documentUpload = new URL(req.url).searchParams.get('upload') === 'bunker-document'
-    const maxBodyBytes = documentUpload ? maxDocumentBytes / 3 * 4 + 4096 : 24000
+    const uploadKind = new URL(req.url).searchParams.get('upload')
+    const documentUpload = uploadKind === 'bunker-document'
+    const privateUpload = uploadKind === 'document'
+    const maxBodyBytes = privateUpload ? Math.ceil(documentLimit / 3) * 4 + 8192 : documentUpload ? maxDocumentBytes / 3 * 4 + 4096 : 32000
     if (Number(req.headers.get('content-length') ?? 0) > maxBodyBytes) throw new Failure('Request is too large.', 413)
     let body: unknown
     try {
@@ -67,7 +75,7 @@ export async function tederApi(req: Request, env: Bindings): Promise<Response> {
       throw new Failure('Invalid request.')
     }
     const { action } = z.object({ action: text(40) }).parse(body)
-    if (documentUpload !== (action === 'bunkerUpload')) throw new Failure('Invalid upload endpoint.')
+    if (documentUpload !== (action === 'bunkerUpload') || privateUpload !== (action === 'documentUpload')) throw new Failure('Invalid upload endpoint.')
     const db = env.DB
     const secret = env.TEDER_JWT_SECRET
     const ip = req.headers.get('CF-Connecting-IP') ?? 'local'
@@ -117,16 +125,21 @@ export async function tederApi(req: Request, env: Bindings): Promise<Response> {
       if (!enquiry) throw new Failure('Receipt not found.', 404)
       return response(enquiry)
     }
+    if (action === 'accessRequest' || action === 'accessTrack') {
+      await quota(env,action,ip,action==='accessRequest'?12:90,3600000)
+      return await companyAccessApi(action,body,env)
+    }
     if (action === 'available') {
       await quota(env, action, ip, 120, 600000)
       const name = z.object({ username }).parse(body).username
-      return response({ available: !await statement('SELECT 1 FROM users WHERE username=?', name).first() })
+      return response({ available: !await statement('SELECT 1 FROM users WHERE username=? UNION SELECT 1 FROM reserved_usernames WHERE username=?', name,name).first() })
     }
     if (action === 'register') {
       await quota(env, action, ip, 20, 3600000)
       const input = z.object({ username, password, code, recoveryConfirmation: code, saved: z.literal(true), company: z.string().trim().max(120).optional(), registration: z.string().trim().max(80).optional(), country: z.string().max(2).optional(), registryRegion: z.string().max(3).optional(), invite: z.string().trim().max(100).optional(), operatorInvite: z.string().regex(/^[a-f0-9]{64}$/).optional(), issuingRegistry: z.string().trim().max(120).optional() }).parse(body)
       if (normalizeCode(input.code) !== normalizeCode(input.recoveryConfirmation)) throw new Failure('Paste the recovery code you copied.')
       if (input.username.startsWith('ops-') && !input.operatorInvite) throw new Failure('Choose a customer username without the ops- prefix.')
+      if (!input.operatorInvite && await statement('SELECT 1 FROM reserved_usernames WHERE username=?',input.username).first()) throw new Failure('That username is reserved.',409)
       const userId = id()
       if (await statement('SELECT id FROM users WHERE username=?', input.username).first()) throw new Failure('That username is taken.', 409)
       const [hashed, recovery] = await Promise.all([passwordHash(input.password, secret), digest(secret, 'recovery', normalizeCode(input.code))])
@@ -151,11 +164,12 @@ export async function tederApi(req: Request, env: Bindings): Promise<Response> {
           const invite = await digest(secret, 'invite', input.invite)
           const [result] = await db.batch([
             statement(`INSERT INTO users (id,username,password_hash,recovery_hash,company_id,role)
-              SELECT ?,?,?,?,company_id,role FROM staff_invites i WHERE hash=? AND used_by IS NULL AND expires_at>?
+              SELECT ?,?,?,?,company_id,role FROM staff_invites i WHERE hash=? AND used_by IS NULL AND expires_at>? AND (i.invited_username IS NULL OR i.invited_username=?)
               AND (SELECT count(*) FROM users WHERE company_id=i.company_id AND disabled_at IS NULL)<?`,
-              userId, input.username, hashed, recovery, invite, now, seatLimit),
+              userId, input.username, hashed, recovery, invite, now, input.username, seatLimit),
             statement('UPDATE staff_invites SET used_by=? WHERE hash=? AND used_by IS NULL AND EXISTS (SELECT 1 FROM users WHERE id=?)', userId, invite, userId),
           ])
+          if(result.meta.changes) await statement("UPDATE users SET authority_status='applicant' WHERE id=? AND company_id IN (SELECT id FROM companies WHERE status<>'approved')",userId).run()
           if (!result.meta.changes) throw new Failure('This invitation is unavailable. Ask the company owner for a current link and available seat.', 409)
         } else {
           const country = input.country ?? ''
@@ -187,7 +201,7 @@ export async function tederApi(req: Request, env: Bindings): Promise<Response> {
       const name = z.object({ username }).parse(body).username
       await quota(env, action + ':user', name, 10, 900000)
       const user = await statement('SELECT id,password_hash,recovery_hash,auth_version FROM users WHERE username=? AND disabled_at IS NULL', name)
-        .first<{ id: string; password_hash: string; recovery_hash: string; auth_version: number }>()
+        .first<{ id: string; password_hash: string; recovery_hash: string; auth_version: number; authority_status:string; authority_until:number|null;can_request:number;can_offer:number;can_accept:number }>()
       if (action === 'login') {
         const value = z.object({ password: z.string().min(1).max(128) }).parse(body).password
         const ok = user ? await matchesPassword(value, secret, user.password_hash) : (await passwordHash(value, secret), false)
@@ -205,13 +219,35 @@ export async function tederApi(req: Request, env: Bindings): Promise<Response> {
       return response({ ok: true }, 200, clearCookie)
     }
     const claims = await readSession(req, env)
-    const user = claims && await statement(`SELECT u.id,u.username,u.company_id,u.role,u.auth_version,c.workspace_kind, CASE WHEN c.workspace_kind='operations' AND EXISTS (SELECT 1 FROM bunker_operators o WHERE o.user_id=u.id AND o.revoked_at IS NULL) THEN 1 ELSE 0 END bunker_operator,c.name company_name,c.status
+    const user = claims && await statement(`SELECT u.id,u.username,u.company_id,CASE WHEN c.workspace_kind='customer' AND (u.authority_status='applicant' OR (u.authority_until IS NOT NULL AND u.authority_until<=unixepoch()*1000)) THEN 'applicant' ELSE u.role END role,u.authority_status,u.authority_until,u.can_request,u.can_offer,u.can_accept,u.auth_version,c.workspace_kind, CASE WHEN c.workspace_kind='operations' AND EXISTS (SELECT 1 FROM bunker_operators o WHERE o.user_id=u.id AND o.revoked_at IS NULL) THEN 1 ELSE 0 END bunker_operator,c.name company_name,c.status
       FROM users u JOIN companies c ON c.id=u.company_id JOIN sessions s ON s.user_id=u.id
       WHERE u.id=? AND s.id=? AND u.auth_version=? AND s.expires_at>? AND u.disabled_at IS NULL`,
       claims.sub, claims.sid, claims.ver, Math.floor(now / 1000)).first<User>()
     if (action === 'session') return response({ user: user ? { ...user, reviewer: user.bunker_operator } : null })
     if (!user || !claims) throw new Failure('Sign in to continue.', 401)
-    if (action.startsWith('energy')) return energyApi(action, body, env, user)
+    if (action === 'dmSend') await quota(env,'messages',user.id,60,60000)
+    if (action === 'documentUpload') await quota(env,'documents',user.id,60,3600000)
+    if (action === 'energyCreate') await quota(env,'energy-intake',user.id,30,3600000)
+    if (action.startsWith('access')) return await companyAccessApi(action,body,env,user)
+    if (action.startsWith('payment')) return await paymentsApi(action,body,env,user,new URL(req.url).origin)
+    if (action.startsWith('dm')) return await messagesApi(action,body,env,user)
+    if (action.startsWith('document')) return await documentsApi(action,body,env,user)
+    if (['companyApplication','submitCompanyApplication','reviewList','reviewDetail','review'].includes(action)) return await verificationApi(action,body,env,user)
+    if (action === 'operatorOverview') {
+      if (!user.bunker_operator) throw new Failure('Teder operator access required.',403)
+      const pending=await statement('SELECT COUNT(*) n FROM company_applications WHERE decision IS NULL').first<{n:number}>()
+      const clarification=await statement('SELECT COUNT(*) n FROM company_applications WHERE decision IS NULL AND clarification IS NOT NULL').first<{n:number}>()
+      const open=await statement("SELECT COUNT(*) n FROM energy_cases WHERE state NOT IN ('closed','cancelled')").first<{n:number}>()
+      const unread=await statement(`SELECT COUNT(*) n FROM dm_messages m JOIN dm_conversations c ON c.id=m.conversation_id LEFT JOIN dm_reads r ON r.conversation_id=c.id AND r.user_id=? WHERE (c.user_a=? OR c.user_b=?) AND m.sender_id<>? AND m.created_at>COALESCE(r.last_read_at,0)`,user.id,user.id,user.id,user.id).first<{n:number}>()
+      return response({pending:pending?.n??0,clarifications:clarification?.n??0,openCases:open?.n??0,unread:unread?.n??0,
+        due:await all("SELECT id,title,next_action,next_at FROM energy_cases WHERE next_at<? AND state NOT IN ('closed','cancelled') ORDER BY next_at LIMIT 50",now),
+        recent:await all('SELECT id,title,state,updated_at FROM energy_cases ORDER BY updated_at DESC LIMIT 30'),
+        reports:await all('SELECT id,reason,created_at FROM dm_reports WHERE resolved_at IS NULL ORDER BY created_at DESC LIMIT 50'),
+        paymentsConfigured:!!env.STRIPE_SECRET_KEY})
+    }
+    if (action.startsWith('energy')) return await energyApi(action, body, env, user)
+    const permissions:Record<string,'request'|'offer'|'accept'>={request:'request',offer:'offer',award:'accept',sign:'accept',bunkerQuote:'offer',bunkerSelect:'accept',bunkerRespond:'accept'}
+    if(permissions[action]&&!canTrade(user,permissions[action])) throw new Failure('Your current company permissions do not allow this action.',403)
     const org = user.company_id
     if (action === 'logout') {
       await statement('DELETE FROM sessions WHERE id=? AND user_id=?', claims.sid, user.id).run()
@@ -515,41 +551,8 @@ export async function tederApi(req: Request, env: Bindings): Promise<Response> {
       }
       return response({ ok: true })
     }
-    if (action === 'companyApplication') {
-      return response({ applications: await all(`SELECT contact_email,registry_reference,authority_reference,submitted_at,decision,decision_note,decided_at
-        FROM company_applications WHERE company_id=? ORDER BY submitted_at DESC LIMIT 20`, org) })
-    }
-    if (action === 'submitCompanyApplication') {
-      if (user.role !== 'owner' || user.workspace_kind !== 'customer') throw new Failure('Customer workspace owner access required.',403)
-      const input = z.object({ email:z.email().max(254), registry:text(500), authority:text(500) }).parse(body)
-      const [inserted] = await db.batch([
-        statement(`INSERT INTO company_applications (id,company_id,contact_email,registry_reference,authority_reference,submitted_by,submitted_at)
-          SELECT ?,id,?,?,?,?,? FROM companies WHERE id=? AND workspace_kind='customer' AND status<>'approved'
-          ON CONFLICT DO NOTHING`, id(),input.email,input.registry,input.authority,user.id,now,org),
-        statement(`UPDATE companies SET status='pending' WHERE id=? AND changes()=1`,org),
-      ])
-      if (!inserted.meta.changes) throw new Failure('An application is already pending or your company is approved.',409)
-      return response({ ok:true })
-    }
-    if (action === 'reviewList' || action === 'review') {
-      if (!user.bunker_operator) throw new Failure('Reviewer access required.', 403)
-      if (action === 'reviewList') return response({ companies: await all(`SELECT c.id,c.name,c.country,c.registry_region,c.registry_number,
-        c.issuing_registry,c.registration,c.status,c.review_note,a.id application_id,a.contact_email,a.registry_reference,a.authority_reference
-        FROM company_applications a JOIN companies c ON c.id=a.company_id WHERE a.decision IS NULL
-        ORDER BY a.submitted_at LIMIT 200`) })
-      const input = z.object({ companyId:uuid, applicationId:uuid, result:z.enum(['approved','rejected']), note:text(500) }).parse(body)
-      const [decision] = await db.batch([
-        statement(`UPDATE company_applications SET decision=?,decision_note=?,decided_by=?,decided_at=?
-          WHERE id=? AND company_id=? AND decision IS NULL AND EXISTS (SELECT 1 FROM bunker_operators WHERE user_id=? AND revoked_at IS NULL)`,
-          input.result,input.note,user.id,now,input.applicationId,input.companyId,user.id),
-        statement(`UPDATE companies SET status=?,reviewed_by=?,reviewed_at=?,review_note=? WHERE id=? AND changes()=1`,
-          input.result,user.id,now,input.note,input.companyId),
-      ])
-      if (!decision.meta.changes) throw new Failure('This application was already decided or is no longer available.',409)
-      return response({ ok:true })
-    }
     if (action === 'team') return response({
-      members: await all(`SELECT username,role,disabled_at FROM users WHERE company_id=? AND (disabled_at IS NULL OR ?=1)
+      members: await all(`SELECT username,role,disabled_at,can_request,can_offer,can_accept,authority_until FROM users WHERE company_id=? AND (disabled_at IS NULL OR ?=1)
         ORDER BY disabled_at IS NOT NULL,role<>'owner',username`, org, Number(user.role==='owner')),
       invites: user.role === 'owner' ? await all('SELECT invite_id,role,expires_at FROM staff_invites WHERE company_id=? AND expires_at>? AND used_by IS NULL ORDER BY expires_at', org, now) : [],
       transfer: await statement(`SELECT t.id,u.username,t.expires_at FROM team_transfers t JOIN users u ON u.id=t.next_owner_id
@@ -559,6 +562,16 @@ export async function tederApi(req: Request, env: Bindings): Promise<Response> {
         WHERE e.company_id=? ORDER BY e.occurred_at DESC LIMIT 50`,org) : [],
       seatLimit,
     })
+    if (action === 'teamPermissions') {
+      if(user.role!=='owner'||!canTrade(user,'accept')) throw new Failure('Verified company owner access required.',403)
+      const i=z.object({member:username,request:z.boolean(),offer:z.boolean(),accept:z.boolean()}).parse(body)
+      const [changed]=await db.batch([
+        statement(`UPDATE users SET can_request=?,can_offer=?,can_accept=?,auth_version=auth_version+1 WHERE username=? AND company_id=? AND role<>'owner' AND disabled_at IS NULL`,Number(i.request),Number(i.offer),Number(i.accept),i.member,org),
+        statement(`DELETE FROM sessions WHERE user_id IN (SELECT id FROM users WHERE username=? AND company_id=?)`,i.member,org),
+      ])
+      if(!changed.meta.changes) throw new Failure('Choose an active teammate.',409)
+      return response({ok:true})
+    }
     if (action === 'teamMember') {
       if (user.role !== 'owner' || user.workspace_kind !== 'customer') throw new Failure('Company owner access required.',403)
       const input = z.discriminatedUnion('operation', [

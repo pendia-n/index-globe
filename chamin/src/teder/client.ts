@@ -1,5 +1,5 @@
 export async function call<T>(action: string, params: Record<string, unknown> = {}): Promise<T> {
-  const response = await fetch(action === 'bunkerUpload' ? '/api/teder?upload=bunker-document' : '/api/teder', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...params, action }) })
+  const response = await fetch(action === 'bunkerUpload' ? '/api/teder?upload=bunker-document' : action === 'documentUpload' ? '/api/teder?upload=document' : '/api/teder', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...params, action }) })
   const data = await response.json()
   if (!response.ok) {
     const message = (data as { error?: string }).error
@@ -7,7 +7,7 @@ export async function call<T>(action: string, params: Record<string, unknown> = 
   }
   return data as T
 }
-export type User = { id: string; username: string; company_id: string; company_name: string; role: string; status: string; workspace_kind: string; reviewer: number; bunker_operator: number }
+export type User = { id: string; username: string; company_id: string; company_name: string; role: string; status: string; workspace_kind: string; reviewer: number; bunker_operator: number; authority_status:string;authority_until:number|null;can_request:number;can_offer:number;can_accept:number }
 type FormProps = { onSubmit: (data: FormData) => Promise<void>; children: React.ReactNode; submit: string; disabled?: boolean }
 export type { FormProps }
 export function field(data: FormData, name: string) { return String(data.get(name) ?? '') }

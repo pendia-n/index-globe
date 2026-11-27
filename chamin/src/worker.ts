@@ -1,4 +1,5 @@
 import entry from '@tanstack/react-start/server-entry'
+import { stripeWebhook } from './teder/payments'
 import { tederApi } from './teder/api'
 import { accountPages, isWorkspacePath, publicPages } from './teder/paths'
 import type { Bindings } from './teder/security'
@@ -6,6 +7,7 @@ import type { Bindings } from './teder/security'
 export default {
   async fetch(request: Request, env: Bindings): Promise<Response> {
     const { pathname } = new URL(request.url)
+    if (pathname === '/api/stripe/webhook') return stripeWebhook(request,env)
     if (pathname === '/api/teder') return tederApi(request, env)
     if (pathname === '/api' || pathname.startsWith('/api/') || pathname === '/mcp' || pathname.startsWith('/mcp/')) {
       return new Response('Not found', { status: 404 })

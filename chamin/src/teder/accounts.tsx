@@ -108,6 +108,6 @@ export function Account({ page, signedIn }: { page: string; signedIn: () => void
       {(!recovery || identified) && <Password newPassword={register || recovery} />}
       {(register || (recovery && identified)) && <RecoveryFields key={code} code={code} replace={setCode} />}
     </Form>}
-    <nav className="auth-links">{page !== '/login' && <a href="/login">Sign in</a>}{!register && <a href="/register">Register a company</a>}{!recovery && <a href="/recovery">Use a recovery code</a>}</nav>
+    <nav className="auth-links">{page !== '/login' && <a href="/login">Sign in</a>}{!register && <a href="/register">Register a company</a>}<a href="/access">Request access to an existing company</a>{!recovery && <a href="/recovery">Use a recovery code</a>}</nav>
   </section>
 }

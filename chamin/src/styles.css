@@ -137,3 +137,14 @@ details { margin-block:1rem; padding:1rem; border:1px solid var(--line); }
 summary { cursor:pointer; font-weight:650; }
 dd { margin:0; overflow-wrap:anywhere; }
 @media(max-width:600px) { dl { grid-template-columns:1fr; } dt { font-weight:700; } .masthead { align-items:flex-start; } .masthead nav { justify-content:flex-end; font-size:.85rem; } }
+.message-layout { display:grid;grid-template-columns:minmax(220px, .7fr) minmax(0,2fr);gap:1.5rem;margin-top:1rem; }
+.message-history { list-style:none;padding:0;display:grid;gap:.8rem; }
+.message-history li { padding:1rem;background:var(--surface);border-left:3px solid var(--line);overflow-wrap:anywhere; }
+.message-history li.mine { border-left-color:var(--marker); }
+.message-history p { white-space:pre-wrap; }
+.message-list a[aria-current="page"] { font-weight:700;text-decoration:underline; }
+.support-entry { margin-top:1.5rem; }
+.evidence { margin-block:1.3rem; }
+.definition { display:contents; }
+code { overflow-wrap:anywhere; }
+@media(max-width:700px) { .message-layout { grid-template-columns:1fr; } .message-list { border-bottom:1px solid var(--line); } }

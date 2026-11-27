@@ -1,3 +1,4 @@
+import { TradeContact } from './messages'
 import { useEffect, useState } from 'react'
 import { call, field } from './client'
 import type { User } from './client'
@@ -142,6 +143,7 @@ export function BunkerTender({ user, id }: { user: User; id: string }) {
   const approved = !coordinator && user.status === 'approved' && ['owner','trader'].includes(user.role)
   const remaining = detail.eligible.filter(s => !invitations.some(i => i.supplier_id === s.id))
   return <section className="workspace">
+    {!coordinator&&<TradeContact kind="bunker" contextId={id}/>}
     <a href="/workspace/bunkers">Marine fuel requests</a>
     <h1>{enquiry.port} · {enquiry.grade}</h1>
     <p>{enquiry.quantity_kg / 1000} metric tonnes · {displayTime(enquiry.arrival_at)} to {displayTime(enquiry.end_at)}</p>

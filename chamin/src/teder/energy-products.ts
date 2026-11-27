@@ -10,6 +10,7 @@ export const specificationHints: Record<string,string> = {
  flexibility:'MW and MWh, asset/site, availability windows, dispatch rights, telemetry, qualified aggregator and performance terms.',
 }
 export type EnergyCase = {
+ sourcing_revision:number;workflow_version:number;blind_brief:string|null;route_checks:string|null;fee_revision:number;fee_payer:string;fee_basis:string;fee_currency:string;buyer_fee_revision:number|null;commission_bps:number;operating_cost_minor:number;operating_minutes:number;resume_state:string|null;cancellation_proposed_by:string|null;cancellation_note:string|null;
  id:string; company_id:string; company_name?:string; side:'buy'|'sell'; product:string; country:string; delivery_point:string;
  title:string; details:string; state:string; revision:number; operator_id:string|null; next_action:string; next_at:number|null;
  route_note:string|null; fee_terms:string|null; selected_offer:string|null; contract_ref:string|null; security_ref:string|null;
